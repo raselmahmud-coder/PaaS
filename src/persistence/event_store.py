@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 from langchain_core.messages import BaseMessage
 from src.persistence.models import AgentEvent, get_session, init_db
+from src.protocol.messages import AgentMessage
 
 
 def _serialize_for_json(obj: Any) -> Any:
@@ -51,14 +52,41 @@ class EventStore:
         input_data: Optional[Dict[str, Any]] = None,
         output_data: Optional[Dict[str, Any]] = None,
         state_snapshot: Optional[Dict[str, Any]] = None,
+        protocol_message: Optional[AgentMessage] = None,
     ) -> AgentEvent:
-        """Log an agent event."""
+        """
+        Log an agent event.
+        
+        Args:
+            agent_id: ID of the agent
+            thread_id: Thread/workflow ID
+            event_type: Type of event (step_start, step_complete, error, protocol_handoff, etc.)
+            step_name: Name of the step (optional)
+            input_data: Input data for the event (optional)
+            output_data: Output data for the event (optional)
+            state_snapshot: State snapshot (optional)
+            protocol_message: Protocol message associated with this event (optional)
+        """
         session = get_session()
         try:
             # Serialize data to ensure JSON compatibility
             serialized_input = _serialize_for_json(input_data) if input_data else None
             serialized_output = _serialize_for_json(output_data) if output_data else None
             serialized_snapshot = _serialize_for_json(state_snapshot) if state_snapshot else None
+            
+            # Add protocol message metadata if provided
+            if protocol_message:
+                if serialized_input is None:
+                    serialized_input = {}
+                if not isinstance(serialized_input, dict):
+                    serialized_input = {"data": serialized_input}
+                serialized_input["_protocol_message"] = {
+                    "message_id": protocol_message.message_id,
+                    "message_type": protocol_message.message_type,
+                    "sender": protocol_message.sender,
+                    "receiver": protocol_message.receiver,
+                    "timestamp": protocol_message.timestamp.isoformat(),
+                }
             
             event = AgentEvent(
                 agent_id=agent_id,

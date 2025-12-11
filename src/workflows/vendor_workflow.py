@@ -2,21 +2,114 @@
 
 from langgraph.graph import StateGraph, END
 from typing import Dict, Any
-from src.agents.base import AgentState
+from src.agents.base import AgentState, with_logging
 from src.agents.product_upload import (
     validate_product_data,
     generate_listing,
     confirm_upload
 )
 from src.persistence.checkpointer import get_checkpointer
-from src.agents.base import with_logging
+from src.protocol.handoff import (
+    create_task_complete_message,
+    create_task_assign_message,
+    extract_state_from_message,
+    message_to_state_dict,
+)
+from src.protocol.validator import validate_message_structure
 
 
 @with_logging
-def generate_marketing_copy(state: AgentState) -> AgentState:
-    """Generate marketing copy from product listing."""
+def protocol_handoff_product_to_marketing(state: AgentState, config=None) -> AgentState:
+    """
+    Protocol-aware handoff node: Product Upload → Marketing.
+    Converts Product agent completion to Marketing agent task assignment.
+    """
+    from src.persistence.event_store import event_store
+    
+    product_agent_id = state.get("agent_id", "product-agent-1")
+    marketing_agent_id = "marketing-agent-1"
+    thread_id = state.get("thread_id", "unknown")
+    
+    # Create TASK_COMPLETE message from Product agent
+    task_complete_msg = create_task_complete_message(
+        sender=product_agent_id,
+        receiver=marketing_agent_id,
+        state=state,
+        completion_status="Product upload completed, ready for marketing",
+    )
+    
+    # Validate message
+    validate_message_structure(task_complete_msg)
+    
+    # Create TASK_ASSIGN message for Marketing agent
+    task_assign_msg = create_task_assign_message(
+        sender=product_agent_id,
+        receiver=marketing_agent_id,
+        state=state,
+        task_description="Generate marketing copy for uploaded product",
+    )
+    
+    # Validate message
+    validate_message_structure(task_assign_msg)
+    
+    # Extract state from TASK_ASSIGN message (for Marketing agent)
+    marketing_state = message_to_state_dict(task_assign_msg)
+    
+    # Update agent_id to marketing agent
+    marketing_state["agent_id"] = marketing_agent_id
+    
+    # Store protocol messages in metadata for logging
+    marketing_state["metadata"] = {
+        **marketing_state.get("metadata", {}),
+        "_protocol_messages": {
+            "task_complete": task_complete_msg.model_dump(),
+            "task_assign": task_assign_msg.model_dump(),
+        },
+    }
+    
+    # Log protocol handoff event with protocol messages
+    event_store.log_event(
+        agent_id=product_agent_id,
+        thread_id=thread_id,
+        event_type="protocol_handoff",
+        step_name="product_to_marketing",
+        input_data={"task_complete_message_id": task_complete_msg.message_id},
+        output_data={"task_assign_message_id": task_assign_msg.message_id},
+        state_snapshot=marketing_state,
+        protocol_message=task_complete_msg,  # Log the completion message
+    )
+    
+    # Also log the task assignment from marketing agent perspective
+    event_store.log_event(
+        agent_id=marketing_agent_id,
+        thread_id=thread_id,
+        event_type="protocol_receive",
+        step_name="product_to_marketing",
+        input_data={"task_assign_message_id": task_assign_msg.message_id},
+        output_data=None,
+        state_snapshot=marketing_state,
+        protocol_message=task_assign_msg,  # Log the assignment message
+    )
+    
+    return marketing_state
+
+
+@with_logging
+def generate_marketing_copy(state: AgentState, config=None) -> AgentState:
+    """
+    Generate marketing copy from product listing.
+    Can accept state directly or extract from protocol message.
+    """
     from langchain_core.messages import HumanMessage, AIMessage
     from src.llm import get_llm
+    
+    # Extract state if it came from protocol message
+    if "_protocol_message_type" in state:
+        # State came from protocol message, use as-is
+        pass
+    elif "metadata" in state and "_protocol_messages" in state.get("metadata", {}):
+        # Protocol messages stored in metadata, state already extracted
+        pass
     
     llm = get_llm(temperature=0.7)
     
@@ -61,7 +154,7 @@ Return only the marketing copy text, no additional commentary."""
 
 
 @with_logging
-def schedule_campaign(state: AgentState) -> AgentState:
+def schedule_campaign(state: AgentState, config=None) -> AgentState:
     """Schedule marketing campaign (mock)."""
     from langchain_core.messages import AIMessage
     
@@ -106,11 +199,16 @@ def create_vendor_workflow(checkpointer=None):
     workflow.add_node("generate_marketing_copy", generate_marketing_copy)
     workflow.add_node("schedule_campaign", schedule_campaign)
     
+    # Add protocol handoff node
+    workflow.add_node("protocol_handoff", protocol_handoff_product_to_marketing)
+    
     # Define edges
     workflow.set_entry_point("validate_product_data")
     workflow.add_edge("validate_product_data", "generate_listing")
     workflow.add_edge("generate_listing", "confirm_upload")
-    workflow.add_edge("confirm_upload", "generate_marketing_copy")
+    # Use protocol handoff instead of direct edge
+    workflow.add_edge("confirm_upload", "protocol_handoff")
+    workflow.add_edge("protocol_handoff", "generate_marketing_copy")
     workflow.add_edge("generate_marketing_copy", "schedule_campaign")
     workflow.add_edge("schedule_campaign", END)
     

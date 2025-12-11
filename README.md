@@ -182,13 +182,58 @@ Available failure injection points:
 - `"generate_listing"` - Fails at step 2
 - `"confirm_upload"` - Fails at step 3
 
+### Protocol Message Integration
+
+The system now supports structured protocol messages for inter-agent communication. The vendor workflow uses protocol messages for handoff between Product Upload and Marketing agents.
+
+**Protocol Message Types:**
+- `TASK_ASSIGN` - Assign a task to an agent
+- `TASK_COMPLETE` - Report task completion
+- `REQUEST_CONTEXT` - Request context from another agent
+- `PROVIDE_CONTEXT` - Provide context to another agent
+
+**Using Protocol Messages:**
+
+```python
+from src.protocol.handoff import create_task_assign_message, extract_state_from_message
+from src.protocol.validator import validate_message
+
+# Create a protocol message
+message = create_task_assign_message(
+    sender="product-agent-1",
+    receiver="marketing-agent-1",
+    state=agent_state,
+    task_description="Generate marketing copy"
+)
+
+# Validate message
+validate_message(message.model_dump())
+
+# Extract state from message
+state = extract_state_from_message(message)
+```
+
+**Protocol Handoff in Workflows:**
+
+The vendor workflow automatically uses protocol messages for handoff:
+- Product agent completes → creates `TASK_COMPLETE` message
+- Marketing agent receives → creates `TASK_ASSIGN` message
+- State extracted from message for processing
+- Protocol messages logged in event store
+
+**Run Protocol Tests:**
+```bash
+pytest tests/test_protocol.py -v
+```
+
 ## Development Status
 
 - [x] Phase 0: Environment Setup
-- [ ] Week 1: Foundation Infrastructure
-- [ ] Week 2: Event Logging
-- [ ] Week 3: Multi-Agent Workflow
-- [ ] Week 4: Basic State Reconstruction
+- [x] Week 1: Foundation Infrastructure
+- [x] Week 2: Event Logging
+- [x] Week 3: Multi-Agent Workflow
+- [x] Week 4: Basic State Reconstruction
+- [x] Phase 2 Week 5: Protocol Message Integration
 
 ## License
 

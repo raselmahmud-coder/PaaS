@@ -16,10 +16,11 @@ class AgentMessage(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     payload: Dict[str, Any] = Field(default_factory=dict)
     
-    class Config:
-        json_encoders = {
+    model_config = {
+        "json_encoders": {
             datetime: lambda v: v.isoformat()
         }
+    }
 
 
 class TaskAssignMessage(AgentMessage):
