@@ -179,6 +179,89 @@ else:
 4. **Workflow Resume**: Invokes workflow with reconstructed state
 5. **Result Return**: Returns recovery status and final workflow result
 
+### Async Recovery with Peer Context
+
+#### reconstruct_async()
+
+Asynchronous reconstruction that queries peer agents via Kafka for enhanced context:
+
+```python
+from src.reconstruction.reconstructor import AgentReconstructor
+
+reconstructor = AgentReconstructor(
+    enable_peer_context=True,
+    peer_context_timeout=5.0,
+)
+
+result = await reconstructor.reconstruct_async(
+    agent_id="product-agent-1",
+    thread_id="thread-123",
+)
+
+# Result includes peer context
+print(f"Peer agents queried: {result['peer_agents_queried']}")
+print(f"Peer context: {result['peer_context']}")
+print(f"Peer insights: {result['reconstructed_state'].get('peer_insights')}")
+```
+
+**Reconstruction with Peer Context Flow:**
+
+1. **Load Checkpoint**: Retrieves last saved checkpoint
+2. **Get Events**: Queries event store for events since checkpoint
+3. **Query Peers**: Broadcasts REQUEST_CONTEXT via Kafka to peer agents
+4. **Collect Responses**: Gathers PROVIDE_CONTEXT responses within timeout
+5. **Build Enhanced Prompt**: Constructs LLM prompt with checkpoint, events, AND peer context
+6. **LLM Inference**: Uses LLM to infer missing state with additional peer insights
+7. **Merge State**: Combines all sources including peer context into final state
+
+#### recover_and_resume_workflow_async()
+
+Complete async recovery workflow with peer context retrieval:
+
+```python
+from src.reconstruction.reconstructor import recover_and_resume_workflow_async
+
+result = await recover_and_resume_workflow_async(
+    workflow=workflow,
+    agent_id="product-agent-1",
+    thread_id="thread-123",
+    initial_state=initial_state,
+    use_peer_context=True,
+    peer_context_timeout=5.0,
+)
+
+if result["recovered"]:
+    print(f"Workflow recovered!")
+    print(f"Peer context used: {result['peer_context_used']}")
+    print(f"Final status: {result['final_result']['status']}")
+```
+
+### Peer Context Retrieval Flow
+
+```mermaid
+sequenceDiagram
+    participant FD as FailureDetector
+    participant AR as AgentReconstructor
+    participant K as Kafka
+    participant PA as PeerAgent
+    participant ES as EventStore
+    participant LLM as LLM
+
+    FD->>FD: Detect failure
+    FD-->>AR: Trigger reconstruction
+    AR->>ES: Load checkpoint + events
+    AR->>K: REQUEST_CONTEXT (broadcast)
+    K->>PA: Receive request
+    PA->>ES: Query interactions
+    ES-->>PA: Interaction history
+    PA->>K: PROVIDE_CONTEXT
+    K-->>AR: Collect responses (5s timeout)
+    AR->>AR: Build enhanced prompt
+    AR->>LLM: Prompt with peer context
+    LLM-->>AR: Inferred state
+    AR->>AR: Merge all sources
+```
+
 ## Usage Examples
 
 ### Basic Failure Detection
@@ -349,5 +432,6 @@ sequenceDiagram
 - **[`src/workflows/`](../workflows/README.md)** - Workflows are resumed using reconstructed state
 - **[`src/agents/`](../agents/README.md)** - Agent state is reconstructed and used to resume agent execution
 - **[`src/llm/`](../llm/README.md)** - LLM is used for intelligent state inference
-- **[`src/protocol/`](../protocol/README.md)** - Future: Will use protocol messages for peer context retrieval
+- **[`src/protocol/`](../protocol/README.md)** - Defines REQUEST_CONTEXT and PROVIDE_CONTEXT message schemas
+- **[`src/messaging/`](../messaging/README.md)** - Kafka infrastructure for peer context retrieval
 

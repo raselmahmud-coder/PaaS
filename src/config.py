@@ -63,6 +63,35 @@ class Settings(BaseSettings):
     # Agent Configuration
     agent_timeout_seconds: int = int(os.getenv("AGENT_TIMEOUT_SECONDS", "30"))
 
+    # ==========================================================================
+    # Kafka Configuration (for peer context retrieval)
+    # ==========================================================================
+    
+    # Kafka broker connection
+    kafka_bootstrap_servers: str = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+    
+    # Kafka topic names
+    kafka_context_request_topic: str = os.getenv(
+        "KAFKA_CONTEXT_REQUEST_TOPIC", "agent.context.request"
+    )
+    kafka_context_response_topic_prefix: str = os.getenv(
+        "KAFKA_CONTEXT_RESPONSE_TOPIC_PREFIX", "agent.context.response"
+    )
+    
+    # Kafka consumer settings
+    kafka_consumer_group_prefix: str = os.getenv(
+        "KAFKA_CONSUMER_GROUP_PREFIX", "paas-agent"
+    )
+    
+    # Peer context retrieval settings
+    peer_context_enabled: bool = os.getenv("PEER_CONTEXT_ENABLED", "true").lower() == "true"
+    peer_context_timeout_seconds: float = float(
+        os.getenv("PEER_CONTEXT_TIMEOUT_SECONDS", "5.0")
+    )
+    peer_context_time_window_seconds: int = int(
+        os.getenv("PEER_CONTEXT_TIME_WINDOW_SECONDS", "3600")
+    )
+
 
 # Global settings instance
 settings = Settings()

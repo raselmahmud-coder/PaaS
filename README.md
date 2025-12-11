@@ -55,7 +55,8 @@ PaaS/
 │   ├── workflows/       # LangGraph workflow definitions
 │   ├── persistence/     # State persistence and event logging
 │   ├── reconstruction/  # Failure detection and state reconstruction
-│   └── protocol/       # Message schemas
+│   ├── protocol/        # Message schemas and validation
+│   └── messaging/       # Kafka messaging for peer context retrieval
 ├── tests/              # Test suite
 ├── data/               # SQLite database files
 └── notebooks/          # Jupyter notebooks for exploration
@@ -167,6 +168,27 @@ if result["recovered"]:
     print(f"Final status: {result['final_result']['status']}")
 ```
 
+### Async Recovery with Peer Context
+
+For enhanced reconstruction using peer agent context via Kafka:
+
+```python
+import asyncio
+from src.reconstruction.reconstructor import recover_and_resume_workflow_async
+
+result = await recover_and_resume_workflow_async(
+    workflow=workflow,
+    agent_id="product-agent-1",
+    thread_id="thread-123",
+    initial_state=initial_state,
+    use_peer_context=True,  # Query peer agents via Kafka
+    peer_context_timeout=5.0,  # Wait up to 5 seconds for responses
+)
+
+if result["recovered"]:
+    print(f"Workflow recovered with peer context: {result['peer_context_used']}")
+```
+
 ### Failure Injection for Testing
 
 To test failure scenarios, you can inject failures at specific steps using the `fail_step` config:
@@ -234,6 +256,9 @@ pytest tests/test_protocol.py -v
 - [x] Week 3: Multi-Agent Workflow
 - [x] Week 4: Basic State Reconstruction
 - [x] Phase 2 Week 5: Protocol Message Integration
+- [x] Phase 2 Week 6: Message Broker Integration (Kafka)
+- [x] Phase 2 Week 7: Peer Context Retrieval
+- [ ] Phase 2 Week 8: Checkpoint Optimization
 
 ## License
 

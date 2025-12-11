@@ -11,6 +11,7 @@ This module contains the test suite for the PaaS system. Tests ensure code quali
 - **`test_persistence.py`** - Tests for database models, checkpointer, and event store
 - **`test_protocol.py`** - Tests for protocol message integration and validation
 - **`test_reconstruction.py`** - Tests for failure detection and state reconstruction
+- **`test_peer_context.py`** - Tests for Kafka messaging and peer context retrieval
 - **`kimi_llm_test.py`** - Manual test for Moonshot/Kimi LLM integration
 
 ## Why This Code Exists
@@ -207,6 +208,37 @@ def test_reconstruction_integration_failure_and_recovery(temp_databases, llm_stu
     # ... verify reconstruction
 ```
 
+#### test_peer_context.py
+
+Tests for Kafka messaging and peer context retrieval (24 tests):
+
+- **Protocol Messages**: Tests REQUEST_CONTEXT/PROVIDE_CONTEXT message creation
+- **Kafka Config**: Tests configuration and topic generation
+- **Context Handler**: Tests database queries for agent interactions
+- **Producer/Consumer**: Tests Kafka producer and consumer in mock mode
+- **Agent Context Service**: Tests background service lifecycle
+- **Integration**: Tests reconstruction with peer context
+
+**Example:**
+
+```python
+@pytest.mark.asyncio
+async def test_reconstruction_with_peer_context_mock(kafka_config):
+    """Test reconstruction with peer context in mock mode."""
+    reconstructor = AgentReconstructor(
+        enable_peer_context=True,
+        peer_context_timeout=0.5,
+    )
+    
+    peer_context = await reconstructor.query_peer_agents(
+        failed_agent_id="agent-failed",
+        thread_id="thread-123",
+    )
+    
+    # In mock mode, returns empty (no Kafka broker)
+    assert peer_context == []
+```
+
 ## Usage Examples
 
 ### Running All Tests
@@ -233,6 +265,9 @@ pytest tests/test_protocol.py
 
 # Run reconstruction tests only
 pytest tests/test_reconstruction.py
+
+# Run peer context tests only
+pytest tests/test_peer_context.py
 ```
 
 ### Running Specific Tests
@@ -283,12 +318,13 @@ pytest --cov=src --cov-report=term
 
 ```
 tests/
-├── conftest.py          # Shared fixtures and configuration
-├── test_agents.py       # Agent function tests
-├── test_persistence.py  # Database and persistence tests
-├── test_protocol.py    # Protocol message tests
-├── test_reconstruction.py  # Reconstruction and recovery tests
-└── kimi_llm_test.py     # Manual LLM integration test
+├── conftest.py             # Shared fixtures and configuration
+├── test_agents.py          # Agent function tests (3 tests)
+├── test_persistence.py     # Database and persistence tests (3 tests)
+├── test_protocol.py        # Protocol message tests (11 tests)
+├── test_reconstruction.py  # Reconstruction and recovery tests (5 tests)
+├── test_peer_context.py    # Kafka and peer context tests (24 tests)
+└── kimi_llm_test.py        # Manual LLM integration test
 ```
 
 ### Test Naming Convention
@@ -393,4 +429,5 @@ async def test_async_function():
 - **[`src/protocol/`](../src/protocol/README.md)** - Protocol tests validate message handling
 - **[`src/reconstruction/`](../src/reconstruction/README.md)** - Reconstruction tests validate recovery mechanisms
 - **[`src/workflows/`](../src/workflows/README.md)** - Workflow tests validate orchestration
+- **[`src/messaging/`](../src/messaging/README.md)** - Peer context tests validate Kafka messaging
 

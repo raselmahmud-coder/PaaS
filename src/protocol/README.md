@@ -22,17 +22,24 @@ The protocol layer addresses several critical needs:
 
 ## When It's Used
 
-### Current Usage (Phase 2 Week 5)
+### Current Usage (Phase 2 Weeks 5-7)
 
 - **Vendor Workflow**: Product → Marketing handoff uses protocol messages
 - **Event Logging**: Protocol messages are logged with metadata in event store
 - **State Extraction**: Messages are converted to/from agent state for workflow execution
+- **Kafka Messaging**: REQUEST_CONTEXT and PROVIDE_CONTEXT messages sent via Kafka
+- **Peer Context Retrieval**: Reconstruction module uses protocol messages to query peer agents
+
+### Completed Integration
+
+- **Phase 2 Week 5**: Protocol schema definition and validation ✅
+- **Phase 2 Week 6**: Kafka message broker integration ✅
+- **Phase 2 Week 7**: Peer context retrieval via Kafka ✅
 
 ### Future Usage
 
-- **Phase 2 Week 6**: Message broker integration (Kafka) will use protocol messages
-- **Phase 2 Week 7**: Peer context retrieval will use REQUEST_CONTEXT and PROVIDE_CONTEXT messages
 - **Phase 3**: Failure injection testing will validate protocol message handling
+- **Phase 4**: Semantic handshake protocol will extend message types
 
 ## Key Components
 
@@ -85,45 +92,89 @@ message = TaskCompleteMessage(
 
 #### REQUEST_CONTEXT
 
-Requests context from another agent:
+Requests context from peer agents about a failed agent. Used during reconstruction to gather distributed context via Kafka:
 
 ```python
 from src.protocol.messages import RequestContextMessage
 
+# Using the factory method (recommended)
+message = RequestContextMessage.create(
+    requester_id="reconstructor-123",
+    failed_agent_id="product-agent-1",
+    thread_id="thread-456",
+    time_window_seconds=3600,
+    response_topic="agent.context.response.reconstructor-123",
+    last_known_step="generate_listing",
+    last_known_status="in_progress",
+)
+
+# Or manual construction
 message = RequestContextMessage(
     sender="reconstruction-module",
-    receiver="marketing-agent-1",
+    receiver="broadcast",  # Broadcast to all agents
     payload={
-        "target_agent_id": "product-agent-1",
-        "time_window": "2024-01-01T00:00:00Z",
-        "requested_data": ["last_interaction", "shared_state"]
+        "failed_agent_id": "product-agent-1",
+        "thread_id": "thread-456",
+        "requester_id": "reconstructor-123",
+        "time_window_seconds": 3600,
+        "response_topic": "agent.context.response.reconstructor-123",
+        "failure_timestamp": "2024-01-15T10:30:00Z",
+        "last_known_step": "generate_listing",
+        "last_known_status": "in_progress",
     }
 )
 ```
 
-**Use Case**: During reconstruction, querying peer agents for context about failed agent.
+**Payload Schema** (`RequestContextPayload`):
+- `failed_agent_id` (required): ID of the agent that failed
+- `thread_id` (required): Thread/workflow ID
+- `requester_id` (required): ID of the reconstruction module
+- `time_window_seconds` (default: 3600): How far back to look for interactions
+- `response_topic` (optional): Kafka topic for responses
+- `failure_timestamp` (optional): When the failure was detected
+- `last_known_step` (optional): Last known step of the failed agent
+- `last_known_status` (optional): Last known status
+
+**Use Case**: During reconstruction, broadcast to peer agents via Kafka to gather context about failed agent.
 
 #### PROVIDE_CONTEXT
 
-Provides context to another agent:
+Provides context to reconstruction module in response to REQUEST_CONTEXT:
 
 ```python
 from src.protocol.messages import ProvideContextMessage
 
-message = ProvideContextMessage(
-    sender="marketing-agent-1",
-    receiver="reconstruction-module",
-    payload={
-        "target_agent_id": "product-agent-1",
-        "context_data": {
-            "last_interaction": {...},
-            "shared_state": {...}
-        }
-    }
+# Using the factory method (recommended)
+message = ProvideContextMessage.create(
+    responder_id="marketing-agent-1",
+    requester_id="reconstructor-123",
+    failed_agent_id="product-agent-1",
+    thread_id="thread-456",
+    interactions=[
+        {"event_type": "protocol_handoff", "step_name": "product_to_marketing", ...}
+    ],
+    memory_state={
+        "has_interactions": True,
+        "interaction_count": 5,
+        "last_interaction_type": "protocol_handoff",
+    },
 )
+
+# Access helper methods
+interactions = message.get_interactions()
+memory_state = message.get_memory_state()
 ```
 
-**Use Case**: Responding to REQUEST_CONTEXT with relevant context data.
+**Payload Schema** (`ProvideContextPayload`):
+- `responder_id` (required): ID of the agent providing context
+- `failed_agent_id` (required): ID of the failed agent
+- `thread_id` (required): Thread/workflow ID
+- `interactions` (default: []): List of interaction events with the failed agent
+- `memory_state` (default: {}): Relevant memory/state from responder's perspective
+- `response_timestamp` (auto): When context was collected
+- `query_window_seconds` (optional): Time window that was queried
+
+**Use Case**: Peer agents respond to REQUEST_CONTEXT with their interaction history and memory state.
 
 ### Message Validation
 
@@ -353,5 +404,6 @@ graph LR
 - **[`src/workflows/`](../workflows/README.md)** - Workflows use protocol handoff for inter-agent communication
 - **[`src/persistence/event_store.py`](../persistence/event_store.py)** - Logs protocol messages with metadata
 - **[`src/agents/`](../agents/README.md)** - Agents receive protocol messages and extract state
-- **[`src/reconstruction/`](../reconstruction/README.md)** - Will use REQUEST_CONTEXT/PROVIDE_CONTEXT for peer context retrieval
+- **[`src/reconstruction/`](../reconstruction/README.md)** - Uses REQUEST_CONTEXT/PROVIDE_CONTEXT for peer context retrieval
+- **[`src/messaging/`](../messaging/README.md)** - Kafka infrastructure for sending/receiving protocol messages
 
