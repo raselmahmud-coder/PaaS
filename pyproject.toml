@@ -1,0 +1,36 @@
+[tool.poetry]
+name = "paas"
+version = "0.1.0"
+description = "Protocol-Aware Agentic Swarm for E-Commerce Vendor Management"
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+packages = [{include = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+langgraph = "^0.2.0"
+langchain = "^0.3.0"
+langchain-openai = "^0.2.0"
+pydantic = "^2.5"
+pydantic-settings = "^2.1"
+sqlalchemy = "^2.0"
+python-dotenv = "^1.0"
+aiosqlite = "^0.20"
+langgraph-checkpoint-sqlite = "*"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4"
+pytest-asyncio = "^0.23"
+ipykernel = "^6.27"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+asyncio_mode = "auto"
+
