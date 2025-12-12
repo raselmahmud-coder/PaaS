@@ -15,12 +15,20 @@ steps:
     action: validate
     expected_status: validated
     timeout_seconds: 30
+    term_conflicts:
+      terms: ["product_name", "product_title"]
+      probability: 0.25
+      severity: low
     
   - name: generate_listing
     agent: product-agent
     action: generate
     expected_status: generated
     timeout_seconds: 60
+    term_conflicts:
+      terms: ["price_amount", "cost_value", "listing_price"]
+      probability: 0.35
+      severity: medium
     
   - name: confirm_upload
     agent: product-agent
@@ -34,12 +42,20 @@ steps:
     expected_status: handoff_complete
     target_agent: marketing-agent
     timeout_seconds: 10
+    term_conflicts:
+      terms: ["product_category", "marketing_segment"]
+      probability: 0.40
+      severity: high
     
   - name: generate_marketing_copy
     agent: marketing-agent
     action: generate_copy
     expected_status: generated
     timeout_seconds: 60
+    term_conflicts:
+      terms: ["target_audience", "customer_segment"]
+      probability: 0.30
+      severity: medium
 
 failure_injection:
   enabled: true

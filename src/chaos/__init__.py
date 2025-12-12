@@ -27,6 +27,15 @@ from src.chaos.scenarios import (
 from src.chaos.runner import ChaosRunner
 from src.chaos.metrics import ResilienceMetrics
 from src.chaos.export import MetricsExporter
+from src.chaos.network import (
+    inject_network_delay,
+    inject_connection_timeout,
+    inject_connection_reset,
+    NetworkConditioner,
+    get_poor_network_conditioner,
+    get_unstable_network_conditioner,
+    get_mobile_network_conditioner,
+)
 
 __all__ = [
     # Exceptions
@@ -57,5 +66,13 @@ __all__ = [
     # Metrics
     "ResilienceMetrics",
     "MetricsExporter",
+    # Network
+    "inject_network_delay",
+    "inject_connection_timeout",
+    "inject_connection_reset",
+    "NetworkConditioner",
+    "get_poor_network_conditioner",
+    "get_unstable_network_conditioner",
+    "get_mobile_network_conditioner",
 ]
 

@@ -27,6 +27,7 @@ matplotlib = "^3.10.8"
 seaborn = "^0.13.2"
 scipy = "^1.16.3"
 jupyter = "^1.1.1"
+httpx = "^0.28"  # Async HTTP client for Shopify API
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4"

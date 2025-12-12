@@ -15,6 +15,10 @@ steps:
     action: validate
     expected_status: validated
     timeout_seconds: 30
+    term_conflicts:
+      terms: ["product_sku", "item_identifier"]
+      probability: 0.20
+      severity: low
     
   - name: generate_premium_listing
     agent: product-agent
@@ -24,12 +28,20 @@ steps:
     config:
       listing_type: premium
       include_seo: true
+    term_conflicts:
+      terms: ["premium_price", "msrp", "retail_price"]
+      probability: 0.40
+      severity: high
     
   - name: quality_review
     agent: product-agent
     action: review
     expected_status: reviewed
     timeout_seconds: 45
+    term_conflicts:
+      terms: ["quality_score", "review_rating"]
+      probability: 0.25
+      severity: medium
     
   - name: confirm_upload
     agent: product-agent
@@ -43,6 +55,10 @@ steps:
     expected_status: handoff_complete
     target_agent: marketing-agent
     timeout_seconds: 10
+    term_conflicts:
+      terms: ["launch_date", "go_live_date", "release_date"]
+      probability: 0.45
+      severity: high
     
   - name: create_launch_campaign
     agent: marketing-agent
@@ -52,12 +68,20 @@ steps:
     config:
       campaign_type: launch
       channels: [email, social, ads]
+    term_conflicts:
+      terms: ["campaign_budget", "marketing_spend", "ad_budget"]
+      probability: 0.35
+      severity: medium
     
   - name: schedule_campaign
     agent: marketing-agent
     action: schedule
     expected_status: scheduled
     timeout_seconds: 30
+    term_conflicts:
+      terms: ["schedule_time", "broadcast_time"]
+      probability: 0.20
+      severity: low
 
 failure_injection:
   enabled: true

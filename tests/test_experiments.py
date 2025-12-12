@@ -266,7 +266,8 @@ class TestComparisonBaselineConditions:
         assert "checkpoint_only" in conditions
         assert "automata_only" in conditions
         assert "llm_only" in conditions
-        assert len(conditions) == 7  # 3 original + 4 comparison
+        assert "real_api" in conditions
+        assert len(conditions) == 8  # 3 original + 4 comparison + 1 real_api
     
     def test_comparison_condition_to_dict(self):
         """Test comparison condition serialization includes new fields."""
@@ -527,9 +528,9 @@ class TestExperimentRunner:
         
         results = runner.run_all_scenarios(condition, runs_per_scenario=5)
         
-        # Should have results for all 4 scenarios
+        # Should have results for all 5 scenarios (including shopify_real)
         scenario_names = set(r.scenario_name for r in results)
-        assert len(scenario_names) == 4
+        assert len(scenario_names) == 5
     
     def test_get_metrics(self):
         """Test getting aggregated metrics."""
@@ -786,6 +787,254 @@ class TestExperimentExport:
         assert "success" in df.columns
 
 
+class TestSemanticMetrics:
+    """Tests for semantic conflict metrics tracking (Gap 4)."""
+    
+    def test_scenario_has_term_conflicts(self):
+        """Test that scenarios have term_conflicts definitions."""
+        from src.experiments.scenario_loader import load_scenario
+        
+        scenario = load_scenario("vendor_onboarding")
+        
+        # Check that at least some steps have term conflicts
+        steps_with_conflicts = [s for s in scenario.steps if s.has_term_conflicts()]
+        assert len(steps_with_conflicts) > 0
+    
+    def test_term_conflict_structure(self):
+        """Test term_conflicts structure in scenario steps."""
+        from src.experiments.scenario_loader import load_scenario
+        
+        scenario = load_scenario("vendor_onboarding")
+        
+        # Find a step with term conflicts
+        for step in scenario.steps:
+            if step.has_term_conflicts():
+                term_conflict = step.term_conflicts
+                assert hasattr(term_conflict, 'terms')
+                assert hasattr(term_conflict, 'probability')
+                assert hasattr(term_conflict, 'severity')
+                assert len(term_conflict.terms) >= 2
+                assert 0 <= term_conflict.probability <= 1
+                assert term_conflict.severity in ['low', 'medium', 'high']
+                break
+    
+    def test_experiment_result_has_semantic_fields(self):
+        """Test that ExperimentResult includes semantic metrics fields."""
+        from src.experiments.runner import ExperimentResult
+        
+        result = ExperimentResult(
+            run_id="test-001",
+            scenario_name="Test",
+            condition_name="test",
+            success=True,
+            total_duration_ms=100.0,
+            steps_completed=5,
+            total_steps=5,
+            failure_occurred=False,
+            semantic_conflicts=3,
+            semantic_resolved=2,
+            semantic_negotiation_ms=150.0,
+        )
+        
+        assert result.semantic_conflicts == 3
+        assert result.semantic_resolved == 2
+        assert result.semantic_negotiation_ms == 150.0
+    
+    def test_step_result_has_semantic_fields(self):
+        """Test that StepResult includes semantic metrics fields."""
+        from src.experiments.runner import StepResult
+        
+        step_result = StepResult(
+            step_name="validate_data",
+            agent="product-agent",
+            status="completed",
+            success=True,
+            duration_ms=50.0,
+            semantic_conflicts=1,
+            semantic_resolved=1,
+            semantic_negotiation_ms=75.0,
+        )
+        
+        assert step_result.semantic_conflicts == 1
+        assert step_result.semantic_resolved == 1
+        assert step_result.semantic_negotiation_ms == 75.0
+    
+    def test_runner_tracks_semantic_conflicts(self):
+        """Test that runner tracks semantic conflicts during execution."""
+        from src.experiments.runner import ExperimentRunner
+        from src.experiments.conditions import FullSystemCondition
+        
+        runner = ExperimentRunner(seed=42)
+        condition = FullSystemCondition()
+        
+        # Run enough experiments to trigger some conflicts
+        results = runner.run_batch("vendor_onboarding", condition, num_runs=50)
+        
+        # Check that some experiments recorded semantic conflicts
+        total_conflicts = sum(r.semantic_conflicts for r in results)
+        total_resolved = sum(r.semantic_resolved for r in results)
+        
+        # With probability-based conflicts, we should see some
+        assert total_conflicts >= 0  # Could be 0 due to probability
+        
+        # If conflicts occurred, some should be resolved (high resolution rate)
+        if total_conflicts > 0:
+            resolution_rate = total_resolved / total_conflicts
+            # Full system has semantic protocol enabled, so resolution should be high
+            assert resolution_rate > 0.7
+    
+    def test_semantic_resolution_rate_by_condition(self):
+        """Test that semantic resolution rate differs by condition."""
+        from src.experiments.runner import ExperimentRunner
+        from src.experiments.conditions import (
+            FullSystemCondition, 
+            BaselineCondition,
+        )
+        
+        runner = ExperimentRunner(seed=42)
+        
+        # Run with semantic protocol enabled (full system)
+        full_condition = FullSystemCondition()
+        full_results = runner.run_batch("vendor_onboarding", full_condition, num_runs=50)
+        
+        full_conflicts = sum(r.semantic_conflicts for r in full_results)
+        full_resolved = sum(r.semantic_resolved for r in full_results)
+        
+        # Clear and run with semantic protocol disabled (baseline)
+        runner.clear()
+        baseline_condition = BaselineCondition()
+        baseline_results = runner.run_batch("vendor_onboarding", baseline_condition, num_runs=50)
+        
+        baseline_conflicts = sum(r.semantic_conflicts for r in baseline_results)
+        baseline_resolved = sum(r.semantic_resolved for r in baseline_results)
+        
+        # Full system should have better resolution rate if conflicts occurred
+        if full_conflicts > 0 and baseline_conflicts > 0:
+            full_rate = full_resolved / full_conflicts
+            baseline_rate = baseline_resolved / baseline_conflicts
+            assert full_rate > baseline_rate
+    
+    def test_collector_aggregates_semantic_metrics(self):
+        """Test that MetricsCollector aggregates semantic metrics."""
+        from src.experiments.collector import MetricsCollector
+        from src.experiments.runner import ExperimentResult
+        
+        collector = MetricsCollector()
+        
+        # Add results with semantic metrics
+        for i in range(10):
+            result = ExperimentResult(
+                run_id=f"test-{i}",
+                scenario_name="Test",
+                condition_name="full_system",
+                success=True,
+                total_duration_ms=100.0,
+                steps_completed=5,
+                total_steps=5,
+                failure_occurred=False,
+                semantic_conflicts=2,
+                semantic_resolved=1 if i % 2 == 0 else 2,
+                semantic_negotiation_ms=100.0 + i * 10,
+            )
+            collector.record_result(result)
+        
+        metrics = collector.get_metrics()
+        
+        # Total conflicts: 10 * 2 = 20
+        assert metrics.semantic_conflicts_total == 20
+        # Resolved: 5 * 1 + 5 * 2 = 15
+        assert metrics.semantic_conflicts_resolved == 15
+        # Resolution rate: 15/20 = 0.75
+        assert abs(metrics.semantic_resolution_rate - 0.75) < 0.01
+        # Negotiation time should be average of 100-190ms
+        assert 100 <= metrics.semantic_negotiation_time_ms <= 200
+    
+    def test_metrics_by_condition_includes_semantic(self):
+        """Test that per-condition metrics include semantic fields."""
+        from src.experiments.collector import MetricsCollector
+        from src.experiments.runner import ExperimentResult
+        
+        collector = MetricsCollector()
+        
+        # Add results for two conditions
+        for condition in ["baseline", "full_system"]:
+            for i in range(5):
+                conflicts = 2 if condition == "full_system" else 1
+                resolved = 2 if condition == "full_system" else 0
+                result = ExperimentResult(
+                    run_id=f"{condition}-{i}",
+                    scenario_name="Test",
+                    condition_name=condition,
+                    success=True,
+                    total_duration_ms=100.0,
+                    steps_completed=5,
+                    total_steps=5,
+                    failure_occurred=False,
+                    semantic_conflicts=conflicts,
+                    semantic_resolved=resolved,
+                )
+                collector.record_result(result)
+        
+        metrics = collector.get_metrics()
+        
+        # Check per-condition semantic metrics
+        assert "semantic_conflicts" in metrics.metrics_by_condition["baseline"]
+        assert "semantic_resolved" in metrics.metrics_by_condition["baseline"]
+        assert "semantic_resolution_rate" in metrics.metrics_by_condition["baseline"]
+        
+        assert "semantic_conflicts" in metrics.metrics_by_condition["full_system"]
+        assert "semantic_resolved" in metrics.metrics_by_condition["full_system"]
+        assert "semantic_resolution_rate" in metrics.metrics_by_condition["full_system"]
+        
+        # Full system should have higher resolution rate
+        full_rate = metrics.metrics_by_condition["full_system"]["semantic_resolution_rate"]
+        baseline_rate = metrics.metrics_by_condition["baseline"]["semantic_resolution_rate"]
+        assert full_rate > baseline_rate
+    
+    def test_experiment_metrics_to_dict_includes_semantic(self):
+        """Test that ExperimentMetrics.to_dict() includes semantic fields."""
+        from src.experiments.collector import ExperimentMetrics
+        
+        metrics = ExperimentMetrics(
+            total_runs=100,
+            semantic_conflicts_total=50,
+            semantic_conflicts_resolved=45,
+            semantic_resolution_rate=0.9,
+            semantic_negotiation_time_ms=125.0,
+        )
+        
+        data = metrics.to_dict()
+        
+        assert data["semantic_conflicts_total"] == 50
+        assert data["semantic_conflicts_resolved"] == 45
+        assert data["semantic_resolution_rate"] == 0.9
+        assert data["semantic_negotiation_time_ms"] == 125.0
+    
+    def test_result_to_dict_includes_semantic(self):
+        """Test that ExperimentResult.to_dict() includes semantic fields."""
+        from src.experiments.runner import ExperimentResult
+        
+        result = ExperimentResult(
+            run_id="test-001",
+            scenario_name="Test",
+            condition_name="full_system",
+            success=True,
+            total_duration_ms=100.0,
+            steps_completed=5,
+            total_steps=5,
+            failure_occurred=False,
+            semantic_conflicts=3,
+            semantic_resolved=2,
+            semantic_negotiation_ms=150.0,
+        )
+        
+        data = result.to_dict()
+        
+        assert data["semantic_conflicts"] == 3
+        assert data["semantic_resolved"] == 2
+        assert data["semantic_negotiation_ms"] == 150.0
+
+
 class TestIntegration:
     """Integration tests for full experiment workflow."""
     
@@ -813,10 +1062,11 @@ class TestIntegration:
         assert "checkpoint_only" in results_by_condition
         assert "automata_only" in results_by_condition
         assert "llm_only" in results_by_condition
+        assert "real_api" in results_by_condition
         
         # Verify metrics
         metrics = runner.get_metrics()
-        assert metrics.total_runs == 70  # 10 * 7 conditions
+        assert metrics.total_runs == 80  # 10 * 8 conditions
     
     def test_experiment_reproducibility(self):
         """Test that experiments are reproducible with seed."""

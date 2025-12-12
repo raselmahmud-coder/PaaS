@@ -37,6 +37,12 @@ class ExperimentMetrics:
     duration_mean_ms: float = 0.0
     duration_std_ms: float = 0.0
     
+    # Semantic Protocol Metrics (Gap 4)
+    semantic_conflicts_total: int = 0
+    semantic_conflicts_resolved: int = 0
+    semantic_resolution_rate: float = 0.0
+    semantic_negotiation_time_ms: float = 0.0
+    
     # By condition
     metrics_by_condition: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     
@@ -65,6 +71,10 @@ class ExperimentMetrics:
             "mttr_p99": self.mttr_p99,
             "duration_mean_ms": self.duration_mean_ms,
             "duration_std_ms": self.duration_std_ms,
+            "semantic_conflicts_total": self.semantic_conflicts_total,
+            "semantic_conflicts_resolved": self.semantic_conflicts_resolved,
+            "semantic_resolution_rate": self.semantic_resolution_rate,
+            "semantic_negotiation_time_ms": self.semantic_negotiation_time_ms,
             "metrics_by_condition": self.metrics_by_condition,
             "metrics_by_scenario": self.metrics_by_scenario,
             "timestamp": self.timestamp,
@@ -156,6 +166,29 @@ class MetricsCollector:
             else 0.0
         )
         
+        # Calculate semantic protocol metrics (Gap 4)
+        semantic_conflicts_total = sum(
+            getattr(r, 'semantic_conflicts', 0) for r in self._results
+        )
+        semantic_conflicts_resolved = sum(
+            getattr(r, 'semantic_resolved', 0) for r in self._results
+        )
+        semantic_resolution_rate = (
+            semantic_conflicts_resolved / semantic_conflicts_total
+            if semantic_conflicts_total > 0
+            else 0.0
+        )
+        semantic_negotiation_times = [
+            getattr(r, 'semantic_negotiation_ms', 0) 
+            for r in self._results 
+            if getattr(r, 'semantic_negotiation_ms', 0) > 0
+        ]
+        semantic_negotiation_time_ms = (
+            statistics.mean(semantic_negotiation_times)
+            if semantic_negotiation_times
+            else 0.0
+        )
+        
         # Calculate by-condition metrics
         metrics_by_condition = {}
         for condition_name, results in self._by_condition.items():
@@ -187,6 +220,10 @@ class MetricsCollector:
             mttr_p99=mttr_p99,
             duration_mean_ms=duration_mean_ms,
             duration_std_ms=duration_std_ms,
+            semantic_conflicts_total=semantic_conflicts_total,
+            semantic_conflicts_resolved=semantic_conflicts_resolved,
+            semantic_resolution_rate=semantic_resolution_rate,
+            semantic_negotiation_time_ms=semantic_negotiation_time_ms,
             metrics_by_condition=metrics_by_condition,
             metrics_by_scenario=metrics_by_scenario,
         )
@@ -207,6 +244,19 @@ class MetricsCollector:
             if r.recovery_success and r.recovery_time_ms > 0
         ]
         
+        # Semantic metrics (Gap 4)
+        semantic_conflicts = sum(
+            getattr(r, 'semantic_conflicts', 0) for r in results
+        )
+        semantic_resolved = sum(
+            getattr(r, 'semantic_resolved', 0) for r in results
+        )
+        semantic_resolution_rate = (
+            semantic_resolved / semantic_conflicts
+            if semantic_conflicts > 0
+            else 0.0
+        )
+        
         return {
             "total_runs": total,
             "successful_runs": successful,
@@ -216,6 +266,9 @@ class MetricsCollector:
             "recovery_rate": recoveries / failures if failures > 0 else 0.0,
             "mttr_mean": statistics.mean(mttr_values) if mttr_values else None,
             "mttr_p50": self._percentile(sorted(mttr_values), 50) if mttr_values else None,
+            "semantic_conflicts": semantic_conflicts,
+            "semantic_resolved": semantic_resolved,
+            "semantic_resolution_rate": semantic_resolution_rate,
         }
     
     @staticmethod

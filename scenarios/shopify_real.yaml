@@ -1,0 +1,173 @@
+# Shopify Real API Validation Scenario
+# 
+# This scenario template defines a real-world product management workflow
+# using the Shopify Admin API for validation of PaaS resilience.
+#
+# Unlike synthetic scenarios, this one makes actual API calls to a
+# Shopify development store, providing external validity evidence.
+
+name: "Shopify Real API Validation"
+description: |
+  Real product operations against Shopify sandbox store.
+  This scenario creates, updates, and deletes test products
+  to validate PaaS resilience with actual e-commerce APIs.
+  
+complexity: high
+is_real_api: true
+api_platform: shopify
+
+# Agent definitions
+agents:
+  - id: shopify-agent
+    type: shopify_product
+    description: "Agent for Shopify product management"
+    capabilities:
+      - create_product
+      - update_product
+      - delete_product
+      - generate_listing
+
+# Workflow steps
+steps:
+  - name: health_check
+    agent: shopify-agent
+    action: verify_api_connectivity
+    description: "Verify Shopify API is accessible"
+    expected_status: healthy
+    timeout_seconds: 10
+    failure_recovery: abort  # If health check fails, abort the scenario
+    
+  - name: validate_and_create
+    agent: shopify-agent
+    action: create_product
+    description: "Validate product data and create in Shopify"
+    expected_status: created
+    timeout_seconds: 30
+    failure_recovery: reconstruct
+    data_source: product_data
+    term_conflicts:
+      terms: ["product_sku", "item_identifier", "variant_id"]
+      probability: 0.25
+      severity: medium
+    
+  - name: generate_listing
+    agent: shopify-agent
+    action: generate_content
+    description: "Use LLM to generate enhanced product listing"
+    expected_status: listing_generated
+    timeout_seconds: 60
+    failure_recovery: reconstruct
+    llm_required: true
+    term_conflicts:
+      terms: ["product_description", "listing_body", "content_html"]
+      probability: 0.35
+      severity: high
+    
+  - name: update_product
+    agent: shopify-agent
+    action: update_product
+    description: "Update Shopify product with generated content"
+    expected_status: updated
+    timeout_seconds: 30
+    failure_recovery: reconstruct
+    term_conflicts:
+      terms: ["price_amount", "compare_at_price", "cost_per_item"]
+      probability: 0.30
+      severity: medium
+    
+  - name: cleanup
+    agent: shopify-agent
+    action: delete_product
+    description: "Clean up test product from Shopify"
+    expected_status: deleted
+    timeout_seconds: 15
+    failure_recovery: ignore  # Cleanup failures are non-critical
+
+# Failure injection configuration
+failure_injection:
+  enabled: true
+  types:
+    - timeout
+    - network_error
+    - api_rate_limit
+    - crash
+    - delay
+  probability: 0.3  # 30% chance of failure per step
+  
+  # Per-type configuration
+  config:
+    timeout:
+      probability: 0.05
+      duration_seconds: 30
+    network_error:
+      probability: 0.05
+      types: [connection_reset, dns_failure]
+    api_rate_limit:
+      probability: 0.02
+      retry_after_seconds: 5
+    crash:
+      probability: 0.03
+    delay:
+      probability: 0.15
+      min_ms: 1000
+      max_ms: 5000
+
+# Network conditions to simulate
+network_conditions:
+  enabled: true
+  presets:
+    - name: stable
+      probability: 0.6
+      latency_ms: 50
+      jitter_ms: 20
+    - name: mobile
+      probability: 0.25
+      latency_ms: 200
+      jitter_ms: 100
+    - name: poor
+      probability: 0.15
+      latency_ms: 500
+      jitter_ms: 300
+      packet_loss: 0.02
+
+# Test product templates
+product_templates:
+  - name: "Widget Pro X"
+    price: 49.99
+    category: "Electronics"
+    description: "A high-quality electronic widget for professionals"
+    sku_prefix: "WPX"
+    
+  - name: "Eco-Friendly Gadget"
+    price: 29.99
+    category: "Sustainable"
+    description: "An environmentally conscious gadget made from recycled materials"
+    sku_prefix: "EFG"
+    
+  - name: "Premium Accessory Set"
+    price: 79.99
+    category: "Accessories"
+    description: "A complete set of premium accessories for everyday use"
+    sku_prefix: "PAS"
+    
+  - name: "Smart Home Device"
+    price: 99.99
+    category: "Smart Home"
+    description: "Connect and control your home with this smart device"
+    sku_prefix: "SHD"
+
+# Metrics to collect
+metrics:
+  - api_response_time
+  - api_error_rate
+  - recovery_success_rate
+  - mttr_seconds
+  - task_completion_rate
+  - cleanup_success_rate
+
+# Success criteria
+success_criteria:
+  min_completion_rate: 0.8
+  max_avg_response_time_ms: 5000
+  max_error_rate: 0.3
+

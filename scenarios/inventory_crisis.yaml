@@ -15,6 +15,10 @@ steps:
     action: detect
     expected_status: alert_triggered
     timeout_seconds: 10
+    term_conflicts:
+      terms: ["inventory_level", "stock_count", "available_units"]
+      probability: 0.30
+      severity: medium
     
   - name: assess_impact
     agent: product-agent
@@ -24,6 +28,10 @@ steps:
     config:
       check_pending_orders: true
       estimate_stockout_date: true
+    term_conflicts:
+      terms: ["stockout_date", "depletion_date", "oos_estimate"]
+      probability: 0.40
+      severity: high
     
   - name: update_listing_availability
     agent: product-agent
@@ -33,6 +41,10 @@ steps:
     config:
       show_low_stock_warning: true
       limit_quantity: true
+    term_conflicts:
+      terms: ["availability_status", "stock_status", "inventory_state"]
+      probability: 0.35
+      severity: high
     
   - name: notify_marketing_urgent
     agent: product-agent
@@ -42,12 +54,20 @@ steps:
     timeout_seconds: 5
     config:
       priority: urgent
+    term_conflicts:
+      terms: ["urgency_level", "priority_score", "alert_severity"]
+      probability: 0.45
+      severity: high
     
   - name: pause_active_campaigns
     agent: marketing-agent
     action: pause_campaigns
     expected_status: campaigns_paused
     timeout_seconds: 30
+    term_conflicts:
+      terms: ["campaign_status", "ad_state"]
+      probability: 0.25
+      severity: medium
     
   - name: create_restock_notification
     agent: marketing-agent
@@ -57,6 +77,10 @@ steps:
     config:
       notification_type: restock_alert
       channels: [email, push]
+    term_conflicts:
+      terms: ["notification_template", "message_format"]
+      probability: 0.30
+      severity: medium
     
   - name: schedule_restock_campaign
     agent: marketing-agent
@@ -66,6 +90,10 @@ steps:
     config:
       trigger: on_restock
       campaign_type: back_in_stock
+    term_conflicts:
+      terms: ["restock_date", "replenishment_date", "arrival_date"]
+      probability: 0.35
+      severity: medium
 
 failure_injection:
   enabled: true

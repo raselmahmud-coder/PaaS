@@ -15,6 +15,24 @@ SCENARIOS_DIR = Path(__file__).parent.parent.parent / "scenarios"
 
 
 @dataclass
+class TermConflict:
+    """Definition of a potential term conflict in a step (Gap 4)."""
+    
+    terms: List[str]  # Terms that may conflict between agents
+    probability: float = 0.3  # Probability of conflict occurring
+    severity: str = "medium"  # low, medium, high - affects resolution difficulty
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "TermConflict":
+        """Create from dictionary."""
+        return cls(
+            terms=data.get("terms", []),
+            probability=data.get("probability", 0.3),
+            severity=data.get("severity", "medium"),
+        )
+
+
+@dataclass
 class ScenarioStep:
     """A single step in a scenario."""
     
@@ -25,10 +43,17 @@ class ScenarioStep:
     timeout_seconds: int = 30
     target_agent: Optional[str] = None
     config: Dict[str, Any] = field(default_factory=dict)
+    # Semantic term conflicts that may occur at this step (Gap 4)
+    term_conflicts: Optional[TermConflict] = None
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ScenarioStep":
         """Create from dictionary."""
+        # Parse term_conflicts if present
+        term_conflicts = None
+        if "term_conflicts" in data:
+            term_conflicts = TermConflict.from_dict(data["term_conflicts"])
+        
         return cls(
             name=data["name"],
             agent=data["agent"],
@@ -37,7 +62,12 @@ class ScenarioStep:
             timeout_seconds=data.get("timeout_seconds", 30),
             target_agent=data.get("target_agent"),
             config=data.get("config", {}),
+            term_conflicts=term_conflicts,
         )
+    
+    def has_term_conflicts(self) -> bool:
+        """Check if this step has potential term conflicts."""
+        return self.term_conflicts is not None and len(self.term_conflicts.terms) > 0
 
 
 @dataclass
@@ -98,21 +128,29 @@ class Scenario:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
+        steps_data = []
+        for s in self.steps:
+            step_dict = {
+                "name": s.name,
+                "agent": s.agent,
+                "action": s.action,
+                "expected_status": s.expected_status,
+            }
+            if s.term_conflicts:
+                step_dict["term_conflicts"] = {
+                    "terms": s.term_conflicts.terms,
+                    "probability": s.term_conflicts.probability,
+                    "severity": s.term_conflicts.severity,
+                }
+            steps_data.append(step_dict)
+        
         return {
             "name": self.name,
             "description": self.description,
             "complexity": self.complexity,
             "version": self.version,
             "agents": self.agents,
-            "steps": [
-                {
-                    "name": s.name,
-                    "agent": s.agent,
-                    "action": s.action,
-                    "expected_status": s.expected_status,
-                }
-                for s in self.steps
-            ],
+            "steps": steps_data,
             "failure_injection": {
                 "enabled": self.failure_injection.enabled,
                 "probability": self.failure_injection.probability,

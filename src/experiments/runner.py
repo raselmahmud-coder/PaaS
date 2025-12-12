@@ -16,6 +16,7 @@ from src.experiments.conditions import (
     ExperimentCondition,
     get_condition,
     get_all_conditions,
+    RealAPICondition,
 )
 from src.experiments.collector import MetricsCollector, ExperimentMetrics
 
@@ -34,6 +35,10 @@ class StepResult:
     error: Optional[str] = None
     recovered: bool = False
     recovery_time_ms: float = 0.0
+    # Semantic protocol metrics (Gap 4)
+    semantic_conflicts: int = 0
+    semantic_resolved: int = 0
+    semantic_negotiation_ms: float = 0.0
 
 
 @dataclass
@@ -55,6 +60,10 @@ class ExperimentResult:
     step_results: List[StepResult] = field(default_factory=list)
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # Semantic protocol metrics (Gap 4)
+    semantic_conflicts: int = 0
+    semantic_resolved: int = 0
+    semantic_negotiation_ms: float = 0.0
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -71,6 +80,9 @@ class ExperimentResult:
             "recovery_attempted": self.recovery_attempted,
             "recovery_success": self.recovery_success,
             "recovery_time_ms": self.recovery_time_ms,
+            "semantic_conflicts": self.semantic_conflicts,
+            "semantic_resolved": self.semantic_resolved,
+            "semantic_negotiation_ms": self.semantic_negotiation_ms,
             "timestamp": self.timestamp,
             "metadata": self.metadata,
         }
@@ -209,12 +221,20 @@ class ExperimentRunner:
                 # Normal execution
                 step_duration_ms = self._simulate_step_execution(step)
                 
+                # Simulate semantic conflicts (Gap 4)
+                conflicts, resolved, neg_time = self._simulate_semantic_conflicts(
+                    step, condition
+                )
+                
                 step_result = StepResult(
                     step_name=step.name,
                     agent=step.agent,
                     status=step.expected_status,
                     success=True,
-                    duration_ms=step_duration_ms,
+                    duration_ms=step_duration_ms + neg_time,  # Add negotiation time
+                    semantic_conflicts=conflicts,
+                    semantic_resolved=resolved,
+                    semantic_negotiation_ms=neg_time,
                 )
                 
                 steps_completed += 1
@@ -228,6 +248,11 @@ class ExperimentRunner:
             steps_completed == scenario.num_steps
             or (failure_occurred and recovery_success)
         )
+        
+        # Aggregate semantic metrics from all steps (Gap 4)
+        total_semantic_conflicts = sum(sr.semantic_conflicts for sr in step_results)
+        total_semantic_resolved = sum(sr.semantic_resolved for sr in step_results)
+        total_semantic_negotiation_ms = sum(sr.semantic_negotiation_ms for sr in step_results)
         
         result = ExperimentResult(
             run_id=run_id,
@@ -243,6 +268,9 @@ class ExperimentRunner:
             recovery_success=recovery_success,
             recovery_time_ms=recovery_time_ms,
             step_results=step_results,
+            semantic_conflicts=total_semantic_conflicts,
+            semantic_resolved=total_semantic_resolved,
+            semantic_negotiation_ms=total_semantic_negotiation_ms,
             metadata={
                 "scenario_complexity": scenario.complexity,
                 "condition_type": condition.condition_type.value,
@@ -261,6 +289,67 @@ class ExperimentRunner:
         # Base duration + some variance
         base_duration = self._rng.uniform(20, 100)
         return base_duration
+    
+    def _simulate_semantic_conflicts(
+        self,
+        step: ScenarioStep,
+        condition: ExperimentCondition,
+    ) -> tuple:
+        """Simulate semantic conflict detection and resolution.
+        
+        Args:
+            step: Current step with potential term_conflicts.
+            condition: Experiment condition (determines if semantic protocol enabled).
+            
+        Returns:
+            Tuple of (conflicts_occurred: int, conflicts_resolved: int, negotiation_time_ms: float).
+        """
+        conflicts_occurred = 0
+        conflicts_resolved = 0
+        negotiation_time_ms = 0.0
+        
+        # Check if step has potential term conflicts
+        if not step.has_term_conflicts():
+            return (0, 0, 0.0)
+        
+        term_conflict = step.term_conflicts
+        
+        # Roll for conflict occurrence based on probability
+        if self._rng.random() < term_conflict.probability:
+            conflicts_occurred = 1
+            
+            # Check if semantic protocol is enabled for this condition
+            if condition.should_use_semantic_protocol():
+                # Semantic protocol enabled - high resolution success rate
+                # Severity affects resolution success rate:
+                # - low: 95% success
+                # - medium: 90% success  
+                # - high: 85% success
+                severity_rates = {
+                    "low": 0.95,
+                    "medium": 0.90,
+                    "high": 0.85,
+                }
+                success_rate = severity_rates.get(term_conflict.severity, 0.90)
+                
+                if self._rng.random() < success_rate:
+                    conflicts_resolved = 1
+                    # Simulate negotiation time: 50-200ms based on severity
+                    time_ranges = {
+                        "low": (50, 100),
+                        "medium": (75, 150),
+                        "high": (100, 200),
+                    }
+                    min_t, max_t = time_ranges.get(term_conflict.severity, (75, 150))
+                    negotiation_time_ms = self._rng.uniform(min_t, max_t)
+            else:
+                # No semantic protocol - much lower resolution rate
+                # Conflicts may still resolve through luck/simple matching
+                if self._rng.random() < 0.30:  # 30% accidental resolution
+                    conflicts_resolved = 1
+                    negotiation_time_ms = self._rng.uniform(10, 30)
+        
+        return (conflicts_occurred, conflicts_resolved, negotiation_time_ms)
     
     def _simulate_recovery(
         self,
@@ -466,6 +555,184 @@ class ExperimentRunner:
         """Clear all results."""
         self._results.clear()
         self.collector.clear()
+    
+    # =========================================================================
+    # Real API Experiment Methods (Async)
+    # =========================================================================
+    
+    async def run_real_api_single(
+        self,
+        product_data: Dict[str, Any],
+        condition: ExperimentCondition,
+        run_id: Optional[str] = None,
+    ) -> ExperimentResult:
+        """Run a single real API experiment against Shopify.
+        
+        Args:
+            product_data: Product data for the experiment
+            condition: Experimental condition to use
+            run_id: Optional run ID
+            
+        Returns:
+            ExperimentResult with real API metrics
+        """
+        from src.workflows.shopify_workflow import run_shopify_workflow
+        from src.chaos.config import get_chaos_config
+        
+        run_id = run_id or str(uuid.uuid4())[:8]
+        
+        logger.info(f"Running real API experiment: run_id={run_id}")
+        
+        start_time = time.time()
+        step_results: List[StepResult] = []
+        
+        # Enable chaos if resilience testing is active
+        chaos_config = get_chaos_config()
+        original_enabled = chaos_config.enabled
+        
+        if condition.should_attempt_recovery():
+            chaos_config.enabled = True
+        else:
+            chaos_config.enabled = False
+        
+        try:
+            # Run the Shopify workflow
+            final_state = await run_shopify_workflow(
+                product_data=product_data,
+                task_id=run_id,
+                agent_id="shopify-agent",
+                use_simple=False,
+            )
+            
+            # Parse results from final state
+            status = final_state.get("status", "failed")
+            success = status == "completed"
+            current_step = final_state.get("current_step", 0)
+            error = final_state.get("error")
+            
+            failure_occurred = error is not None or status == "failed"
+            
+            # Extract step info from messages
+            messages = final_state.get("messages", [])
+            for i, msg in enumerate(messages):
+                step_results.append(StepResult(
+                    step_name=f"step_{i}",
+                    agent="shopify-agent",
+                    status="success" if success else "failed",
+                    success=success,
+                    duration_ms=0,  # Real duration tracked separately
+                ))
+            
+            total_duration_ms = (time.time() - start_time) * 1000
+            
+            # Determine recovery stats
+            recovery_attempted = failure_occurred and condition.should_attempt_recovery()
+            recovery_success = recovery_attempted and success
+            
+            result = ExperimentResult(
+                run_id=run_id,
+                scenario_name="shopify_real",
+                condition_name=condition.name,
+                success=success,
+                total_duration_ms=total_duration_ms,
+                steps_completed=current_step,
+                total_steps=4,  # health_check, create, generate, update, cleanup
+                failure_occurred=failure_occurred,
+                failure_step=error if failure_occurred else None,
+                recovery_attempted=recovery_attempted,
+                recovery_success=recovery_success,
+                recovery_time_ms=total_duration_ms if recovery_success else 0,
+                step_results=step_results,
+                metadata={
+                    "is_real_api": True,
+                    "condition_type": condition.condition_type.value,
+                    "product_name": product_data.get("name", "unknown"),
+                    "final_state": {
+                        "status": status,
+                        "current_step": current_step,
+                        "error": error,
+                    },
+                },
+            )
+            
+            self.collector.record_result(result)
+            self._results.append(result)
+            
+            return result
+            
+        finally:
+            # Restore chaos config
+            chaos_config.enabled = original_enabled
+    
+    async def run_real_api_batch(
+        self,
+        condition: ExperimentCondition,
+        num_runs: int = 100,
+        product_templates: Optional[List[Dict[str, Any]]] = None,
+        progress_callback: Optional[callable] = None,
+    ) -> List[ExperimentResult]:
+        """Run batch of real API experiments.
+        
+        Args:
+            condition: Experimental condition
+            num_runs: Number of runs
+            product_templates: Optional list of product templates to use
+            progress_callback: Optional callback(current, total)
+            
+        Returns:
+            List of experiment results
+        """
+        # Default product templates
+        if product_templates is None:
+            product_templates = [
+                {"name": "Widget Pro X", "price": 49.99, "category": "Electronics"},
+                {"name": "Eco Gadget", "price": 29.99, "category": "Sustainable"},
+                {"name": "Premium Set", "price": 79.99, "category": "Accessories"},
+                {"name": "Smart Device", "price": 99.99, "category": "Smart Home"},
+            ]
+        
+        results = []
+        
+        for i in range(num_runs):
+            run_id = f"real-{condition.name[:4]}-{i:04d}"
+            
+            # Cycle through product templates
+            product_data = product_templates[i % len(product_templates)].copy()
+            
+            # Add unique identifier
+            product_data["name"] = f"{product_data['name']}_{i:04d}"
+            product_data["sku"] = f"PAAS-{run_id}"
+            
+            try:
+                result = await self.run_real_api_single(
+                    product_data=product_data,
+                    condition=condition,
+                    run_id=run_id,
+                )
+                results.append(result)
+            except Exception as e:
+                logger.error(f"Real API experiment {run_id} failed: {e}")
+                # Record as failed
+                results.append(ExperimentResult(
+                    run_id=run_id,
+                    scenario_name="shopify_real",
+                    condition_name=condition.name,
+                    success=False,
+                    total_duration_ms=0,
+                    steps_completed=0,
+                    total_steps=4,
+                    failure_occurred=True,
+                    failure_step=str(e),
+                    metadata={"error": str(e), "is_real_api": True},
+                ))
+            
+            if progress_callback:
+                progress_callback(i + 1, num_runs)
+            
+            # Small delay between runs to respect rate limits
+            await asyncio.sleep(0.5)
+        
+        return results
 
 
 # Convenience functions
@@ -489,6 +756,24 @@ def run_all_experiments(
     return runner.run_full_experiment(runs_per_condition)
 
 
+async def run_real_api_experiments(
+    num_runs: int = 100,
+    condition_name: str = "real_api",
+) -> List[ExperimentResult]:
+    """Run real API experiments against Shopify.
+    
+    Args:
+        num_runs: Number of experiment runs
+        condition_name: Condition to use (default: real_api)
+        
+    Returns:
+        List of experiment results
+    """
+    runner = ExperimentRunner()
+    condition = get_condition(condition_name)
+    return await runner.run_real_api_batch(condition, num_runs)
+
+
 def main():
     """CLI entry point."""
     parser = argparse.ArgumentParser(description="Run PaaS experiments")
@@ -505,6 +790,9 @@ def main():
         "--all-conditions", action="store_true", help="Run all conditions"
     )
     parser.add_argument(
+        "--real-api", action="store_true", help="Run real API experiments (Shopify)"
+    )
+    parser.add_argument(
         "--seed", type=int, help="Random seed for reproducibility"
     )
     parser.add_argument(
@@ -517,7 +805,37 @@ def main():
     
     runner = ExperimentRunner(seed=args.seed)
     
-    if args.all_conditions:
+    if args.real_api:
+        # Run real API experiments
+        async def run_real():
+            condition_name = args.condition or "real_api"
+            condition = get_condition(condition_name)
+            
+            print(f"Running {args.runs} real API experiments with {condition_name}...")
+            results = await runner.run_real_api_batch(condition, args.runs)
+            
+            # Export results
+            from src.experiments.export import ExperimentExporter
+            
+            output_dir = Path(args.output) / "real_api"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            exporter = ExperimentExporter(output_dir)
+            exporter.export_results(results, condition_name)
+            
+            print(f"Completed {len(results)} real API experiment runs")
+            
+            success_count = sum(1 for r in results if r.success)
+            print(f"Success rate: {success_count / len(results):.1%}")
+            
+            recovery_results = [r for r in results if r.recovery_attempted]
+            if recovery_results:
+                recovery_success = sum(1 for r in recovery_results if r.recovery_success)
+                print(f"Recovery success rate: {recovery_success / len(recovery_results):.1%}")
+        
+        asyncio.run(run_real())
+    
+    elif args.all_conditions:
         results = runner.run_full_experiment(args.runs)
         
         # Export results

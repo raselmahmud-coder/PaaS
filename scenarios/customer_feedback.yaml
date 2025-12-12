@@ -15,6 +15,10 @@ steps:
     action: receive
     expected_status: feedback_received
     timeout_seconds: 15
+    term_conflicts:
+      terms: ["feedback_type", "review_category"]
+      probability: 0.20
+      severity: low
     
   - name: analyze_feedback
     agent: product-agent
@@ -24,18 +28,30 @@ steps:
     config:
       sentiment_analysis: true
       categorize: true
+    term_conflicts:
+      terms: ["sentiment_score", "satisfaction_rating", "nps_score"]
+      probability: 0.35
+      severity: medium
     
   - name: update_product_data
     agent: product-agent
     action: update
     expected_status: updated
     timeout_seconds: 30
+    term_conflicts:
+      terms: ["product_description", "listing_content"]
+      probability: 0.30
+      severity: medium
     
   - name: regenerate_listing
     agent: product-agent
     action: generate
     expected_status: generated
     timeout_seconds: 60
+    term_conflicts:
+      terms: ["listing_version", "content_revision"]
+      probability: 0.25
+      severity: low
     
   - name: confirm_changes
     agent: product-agent
@@ -49,12 +65,20 @@ steps:
     expected_status: handoff_complete
     target_agent: marketing-agent
     timeout_seconds: 10
+    term_conflicts:
+      terms: ["update_priority", "change_urgency"]
+      probability: 0.40
+      severity: high
     
   - name: update_marketing_materials
     agent: marketing-agent
     action: update_materials
     expected_status: materials_updated
     timeout_seconds: 60
+    term_conflicts:
+      terms: ["marketing_copy", "ad_content", "promo_text"]
+      probability: 0.30
+      severity: medium
 
 failure_injection:
   enabled: true

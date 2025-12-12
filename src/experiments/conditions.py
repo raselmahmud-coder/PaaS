@@ -21,6 +21,8 @@ class ConditionType(Enum):
     CHECKPOINT_ONLY = "checkpoint_only"
     AUTOMATA_ONLY = "automata_only"
     LLM_ONLY = "llm_only"
+    # Real API validation
+    REAL_API = "real_api"
 
 
 @dataclass
@@ -38,6 +40,7 @@ class ConditionConfig:
     max_retries: int = 0  # For simple retry strategy
     use_checkpoint_restart: bool = False  # For checkpoint-only strategy
     llm_fallback_enabled: bool = True  # Whether LLM fallback is allowed
+    is_real_api: bool = False  # Whether this condition uses real APIs
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -52,6 +55,7 @@ class ConditionConfig:
             "max_retries": self.max_retries,
             "use_checkpoint_restart": self.use_checkpoint_restart,
             "llm_fallback_enabled": self.llm_fallback_enabled,
+            "is_real_api": self.is_real_api,
         }
 
 
@@ -294,6 +298,47 @@ class LLMOnlyCondition(ExperimentCondition):
         )
 
 
+# =============================================================================
+# Real API Validation Condition
+# =============================================================================
+
+
+class RealAPICondition(ExperimentCondition):
+    """Real API condition: Full PaaS with real Shopify API.
+    
+    This condition uses the complete PaaS system but runs against
+    a real Shopify development store, providing external validity
+    evidence for the thesis.
+    
+    Features enabled:
+    - Semantic protocol for term alignment
+    - Automata learning for behavior prediction
+    - LLM-based reconstruction with peer context
+    - Real Shopify API operations
+    
+    Comparable to: Production-like e-commerce operations.
+    """
+    
+    def _get_config(self) -> ConditionConfig:
+        return ConditionConfig(
+            name="real_api",
+            condition_type=ConditionType.REAL_API,
+            resilience_enabled=True,
+            semantic_protocol_enabled=True,
+            automata_enabled=True,
+            peer_context_enabled=True,
+            description="Full PaaS with real Shopify API operations",
+            max_retries=0,
+            use_checkpoint_restart=False,
+            llm_fallback_enabled=True,
+            is_real_api=True,
+        )
+    
+    def is_real_api_condition(self) -> bool:
+        """Check if this is a real API condition."""
+        return True
+
+
 # Registry of conditions
 CONDITION_REGISTRY: Dict[str, Type[ExperimentCondition]] = {
     # Original conditions
@@ -305,6 +350,8 @@ CONDITION_REGISTRY: Dict[str, Type[ExperimentCondition]] = {
     "checkpoint_only": CheckpointOnlyCondition,
     "automata_only": AutomataOnlyCondition,
     "llm_only": LLMOnlyCondition,
+    # Real API validation
+    "real_api": RealAPICondition,
 }
 
 

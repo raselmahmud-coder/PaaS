@@ -91,6 +91,22 @@ class Settings(BaseSettings):
     peer_context_time_window_seconds: int = int(
         os.getenv("PEER_CONTEXT_TIME_WINDOW_SECONDS", "3600")
     )
+    
+    # ==========================================================================
+    # Shopify Integration (for real-world validation)
+    # ==========================================================================
+    
+    # Shopify store URL (e.g., "mystore.myshopify.com")
+    shopify_store_url: str = os.getenv("SHOPIFY_STORE_URL", "")
+    
+    # Shopify Admin API access token
+    shopify_access_token: str = os.getenv("SHOPIFY_ACCESS_TOKEN", "")
+    
+    # Shopify API version
+    shopify_api_version: str = os.getenv("SHOPIFY_API_VERSION", "2024-01")
+    
+    # Rate limiting (requests per second, conservative default)
+    shopify_rate_limit: int = int(os.getenv("SHOPIFY_RATE_LIMIT", "2"))
 
 
 # Global settings instance
