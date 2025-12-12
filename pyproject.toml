@@ -18,6 +18,15 @@ python-dotenv = "^1.0"
 aiosqlite = "^0.20"
 langgraph-checkpoint-sqlite = "*"
 aiokafka = "^0.10"  # Async Kafka client for peer context retrieval
+sentence-transformers = "^5.2.0"
+numpy = "^2.3.5"
+aalpy = "^1.5.3"
+pyyaml = "^6.0.3"
+pandas = "^2.3.3"
+matplotlib = "^3.10.8"
+seaborn = "^0.13.2"
+scipy = "^1.16.3"
+jupyter = "^1.1.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4"

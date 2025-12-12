@@ -401,3 +401,131 @@ def reset_metrics() -> None:
     global _global_metrics
     _global_metrics = None
 
+
+# Experiment integration helpers
+
+def create_experiment_metrics_bridge():
+    """Create a bridge between experiment runner and resilience metrics.
+    
+    Returns:
+        Bridge object with methods to record experiment events.
+    """
+    return ExperimentMetricsBridge(get_metrics())
+
+
+class ExperimentMetricsBridge:
+    """Bridge between experiment framework and resilience metrics.
+    
+    Provides convenient methods to record experiment events in resilience metrics format.
+    """
+    
+    def __init__(self, metrics: ResilienceMetrics):
+        """Initialize the bridge.
+        
+        Args:
+            metrics: ResilienceMetrics instance to record to.
+        """
+        self.metrics = metrics
+        self._active_recovery: Optional[RecoveryEvent] = None
+    
+    def on_experiment_start(self) -> None:
+        """Called when an experiment batch starts."""
+        self.metrics.start_measurement()
+    
+    def on_experiment_end(self) -> MetricsSummary:
+        """Called when an experiment batch ends.
+        
+        Returns:
+            Summary of metrics collected during the experiment.
+        """
+        return self.metrics.get_summary()
+    
+    def on_failure_injected(
+        self,
+        agent_id: str,
+        run_id: str,
+        failure_type: str,
+    ) -> RecoveryEvent:
+        """Called when a failure is injected.
+        
+        Args:
+            agent_id: ID of the affected agent.
+            run_id: Experiment run ID.
+            failure_type: Type of failure (crash, timeout, etc.).
+            
+        Returns:
+            RecoveryEvent to track recovery.
+        """
+        event = self.metrics.record_failure(agent_id, run_id, failure_type)
+        self._active_recovery = event
+        return event
+    
+    def on_recovery_complete(
+        self,
+        success: bool,
+        reconstruction_accuracy: Optional[float] = None,
+        peer_context_used: bool = False,
+        peer_agents_queried: int = 0,
+    ) -> None:
+        """Called when recovery completes.
+        
+        Args:
+            success: Whether recovery succeeded.
+            reconstruction_accuracy: Accuracy of state reconstruction.
+            peer_context_used: Whether peer context was queried.
+            peer_agents_queried: Number of peers queried.
+        """
+        self.metrics.record_recovery(
+            event=self._active_recovery,
+            success=success,
+            reconstruction_accuracy=reconstruction_accuracy,
+            peer_context_used=peer_context_used,
+            peer_agents_queried=peer_agents_queried,
+        )
+        self._active_recovery = None
+    
+    def on_task_complete(
+        self,
+        task_id: str,
+        success: bool,
+        had_failure: bool = False,
+        recovered: bool = False,
+    ) -> None:
+        """Called when a task completes.
+        
+        Args:
+            task_id: ID of the completed task.
+            success: Whether the task succeeded.
+            had_failure: Whether the task experienced failure.
+            recovered: Whether the task recovered from failure.
+        """
+        self.metrics.record_task_completion(
+            task_id=task_id,
+            completed=success,
+            had_failure=had_failure,
+            recovered=recovered,
+        )
+    
+    def get_mttr_values(self) -> List[float]:
+        """Get all MTTR values in seconds.
+        
+        Returns:
+            List of MTTR values for successful recoveries.
+        """
+        return [
+            e.mttr_seconds 
+            for e in self.metrics.get_events()
+            if e.mttr_seconds is not None and e.success
+        ]
+    
+    def get_recovery_rate(self) -> float:
+        """Get overall recovery success rate.
+        
+        Returns:
+            Recovery rate as fraction (0.0 to 1.0).
+        """
+        events = self.metrics.get_events()
+        if not events:
+            return 0.0
+        successful = sum(1 for e in events if e.success)
+        return successful / len(events)

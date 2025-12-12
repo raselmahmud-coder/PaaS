@@ -1,0 +1,84 @@
+name: Product Launch Campaign
+description: Launch a new product with marketing campaign coordination
+complexity: high
+version: "1.0"
+
+agents:
+  - id: product-agent
+    type: product_upload
+  - id: marketing-agent
+    type: marketing
+
+steps:
+  - name: validate_product_data
+    agent: product-agent
+    action: validate
+    expected_status: validated
+    timeout_seconds: 30
+    
+  - name: generate_premium_listing
+    agent: product-agent
+    action: generate
+    expected_status: generated
+    timeout_seconds: 90
+    config:
+      listing_type: premium
+      include_seo: true
+    
+  - name: quality_review
+    agent: product-agent
+    action: review
+    expected_status: reviewed
+    timeout_seconds: 45
+    
+  - name: confirm_upload
+    agent: product-agent
+    action: confirm
+    expected_status: completed
+    timeout_seconds: 30
+    
+  - name: handoff_to_marketing
+    agent: product-agent
+    action: handoff
+    expected_status: handoff_complete
+    target_agent: marketing-agent
+    timeout_seconds: 10
+    
+  - name: create_launch_campaign
+    agent: marketing-agent
+    action: create_campaign
+    expected_status: campaign_created
+    timeout_seconds: 120
+    config:
+      campaign_type: launch
+      channels: [email, social, ads]
+    
+  - name: schedule_campaign
+    agent: marketing-agent
+    action: schedule
+    expected_status: scheduled
+    timeout_seconds: 30
+
+failure_injection:
+  enabled: true
+  probability: 0.3
+  target_steps: [1, 2, 5, 6]
+  failure_types:
+    - crash
+    - timeout
+    - hallucination
+
+initial_state:
+  task_id: "product-launch-{{run_id}}"
+  product_data:
+    name: "New Premium Product"
+    price: 149.99
+    category: "Premium Electronics"
+    description: "Premium product launch"
+    launch_date: "2024-01-15"
+
+success_criteria:
+  final_status: scheduled
+  all_steps_executed: true
+  campaign_created: true
+

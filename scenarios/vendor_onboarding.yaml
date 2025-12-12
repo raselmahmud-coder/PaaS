@@ -1,0 +1,63 @@
+name: Vendor Onboarding
+description: Complete vendor registration and product upload flow
+complexity: medium
+version: "1.0"
+
+agents:
+  - id: product-agent
+    type: product_upload
+  - id: marketing-agent
+    type: marketing
+
+steps:
+  - name: validate_product_data
+    agent: product-agent
+    action: validate
+    expected_status: validated
+    timeout_seconds: 30
+    
+  - name: generate_listing
+    agent: product-agent
+    action: generate
+    expected_status: generated
+    timeout_seconds: 60
+    
+  - name: confirm_upload
+    agent: product-agent
+    action: confirm
+    expected_status: completed
+    timeout_seconds: 30
+    
+  - name: handoff_to_marketing
+    agent: product-agent
+    action: handoff
+    expected_status: handoff_complete
+    target_agent: marketing-agent
+    timeout_seconds: 10
+    
+  - name: generate_marketing_copy
+    agent: marketing-agent
+    action: generate_copy
+    expected_status: generated
+    timeout_seconds: 60
+
+failure_injection:
+  enabled: true
+  probability: 0.3
+  target_steps: [1, 2]
+  failure_types:
+    - crash
+    - timeout
+
+initial_state:
+  task_id: "vendor-onboard-{{run_id}}"
+  product_data:
+    name: "Sample Product"
+    price: 29.99
+    category: "Electronics"
+    description: "A sample product for testing"
+
+success_criteria:
+  final_status: completed
+  all_steps_executed: true
+

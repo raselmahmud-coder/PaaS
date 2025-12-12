@@ -1,0 +1,94 @@
+name: Inventory Crisis Response
+description: Handle low inventory alert and coordinate restocking with marketing
+complexity: high
+version: "1.0"
+
+agents:
+  - id: product-agent
+    type: product_upload
+  - id: marketing-agent
+    type: marketing
+
+steps:
+  - name: detect_low_inventory
+    agent: product-agent
+    action: detect
+    expected_status: alert_triggered
+    timeout_seconds: 10
+    
+  - name: assess_impact
+    agent: product-agent
+    action: analyze
+    expected_status: impact_assessed
+    timeout_seconds: 30
+    config:
+      check_pending_orders: true
+      estimate_stockout_date: true
+    
+  - name: update_listing_availability
+    agent: product-agent
+    action: update
+    expected_status: availability_updated
+    timeout_seconds: 20
+    config:
+      show_low_stock_warning: true
+      limit_quantity: true
+    
+  - name: notify_marketing_urgent
+    agent: product-agent
+    action: handoff
+    expected_status: handoff_complete
+    target_agent: marketing-agent
+    timeout_seconds: 5
+    config:
+      priority: urgent
+    
+  - name: pause_active_campaigns
+    agent: marketing-agent
+    action: pause_campaigns
+    expected_status: campaigns_paused
+    timeout_seconds: 30
+    
+  - name: create_restock_notification
+    agent: marketing-agent
+    action: create_notification
+    expected_status: notification_created
+    timeout_seconds: 45
+    config:
+      notification_type: restock_alert
+      channels: [email, push]
+    
+  - name: schedule_restock_campaign
+    agent: marketing-agent
+    action: schedule
+    expected_status: scheduled
+    timeout_seconds: 30
+    config:
+      trigger: on_restock
+      campaign_type: back_in_stock
+
+failure_injection:
+  enabled: true
+  probability: 0.35
+  target_steps: [2, 3, 4, 5]
+  failure_types:
+    - crash
+    - timeout
+    - message_corruption
+
+initial_state:
+  task_id: "inventory-crisis-{{run_id}}"
+  inventory_data:
+    product_id: "prod-critical-001"
+    current_stock: 5
+    threshold: 10
+    daily_sales_avg: 8
+    pending_orders: 3
+    reorder_lead_time_days: 7
+
+success_criteria:
+  final_status: scheduled
+  all_steps_executed: true
+  campaigns_paused: true
+  customers_notified: true
+
