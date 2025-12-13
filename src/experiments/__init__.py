@@ -24,7 +24,6 @@ from src.experiments.runner import (
 from src.experiments.collector import (
     MetricsCollector,
     ExperimentMetrics,
-    aggregate_metrics,
 )
 
 __all__ = [
@@ -49,6 +48,5 @@ __all__ = [
     # Collector
     "MetricsCollector",
     "ExperimentMetrics",
-    "aggregate_metrics",
 ]
 

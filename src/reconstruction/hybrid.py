@@ -89,6 +89,7 @@ class HybridReconstructor:
         checkpoint_freshness: int = 30,
         min_events_for_automata: int = 50,
         automata_confidence_threshold: float = 0.7,
+        kafka_config: Optional[Any] = None,
     ):
         """Initialize the hybrid reconstructor.
         
@@ -99,6 +100,7 @@ class HybridReconstructor:
             checkpoint_freshness: Max age (seconds) for checkpoint to be "fresh".
             min_events_for_automata: Minimum events needed for L* learning.
             automata_confidence_threshold: Min confidence to use automata alone.
+            kafka_config: Optional Kafka configuration for peer context queries.
         """
         self.enable_automata = enable_automata
         self.enable_llm = enable_llm
@@ -106,6 +108,7 @@ class HybridReconstructor:
         self.checkpoint_freshness = checkpoint_freshness
         self.min_events_for_automata = min_events_for_automata
         self.automata_confidence_threshold = automata_confidence_threshold
+        self._kafka_config = kafka_config
         
         # Components
         self._behavior_predictor: Optional[BehaviorPredictor] = None
@@ -284,22 +287,28 @@ class HybridReconstructor:
                     enable_peer_context=self.enable_peer_context
                 )
             
-            # Query peer context if enabled
+            # Query peer context if enabled (HybridReconstructor handles this separately)
             peer_context = []
             if self.enable_peer_context:
-                peer_context = await self._query_peer_context(agent_id)
+                peer_context = await self._query_peer_context(agent_id, thread_id)
             
-            # Reconstruct using LLM
+            # Reconstruct using LLM (disable internal peer context since we handle it)
             result = await self._llm_reconstructor.reconstruct_async(
                 agent_id=agent_id,
                 thread_id=thread_id,
-                peer_context=peer_context,
+                use_peer_context=False,  # We handle peer context above
             )
+            
+            # Merge peer context into the result
+            reconstructed_state = result.get("reconstructed_state", {})
+            if peer_context:
+                reconstructed_state["peer_context"] = peer_context
+                reconstructed_state["peer_agents_queried"] = len(peer_context)
             
             return HybridReconstructionResult(
                 success=result.get("success", False),
                 strategy=ReconstructionStrategy.LLM,
-                reconstructed_state=result.get("reconstructed_state", {}),
+                reconstructed_state=reconstructed_state,
                 confidence=result.get("confidence", 0.5),
                 agent_id=agent_id,
                 thread_id=thread_id,
@@ -312,18 +321,66 @@ class HybridReconstructor:
             logger.warning(f"LLM reconstruction failed: {e}")
             return None
     
-    async def _query_peer_context(self, agent_id: str) -> List[Dict[str, Any]]:
-        """Query peer agents for context."""
-        try:
-            from src.messaging.producer import KafkaProducer
-            from src.messaging.consumer import KafkaConsumer
-            from src.protocol.messages import RequestContextMessage
+    async def _query_peer_context(
+        self,
+        agent_id: str,
+        thread_id: str,
+    ) -> List[Dict[str, Any]]:
+        """Query peer agents for context via Kafka.
+        
+        Args:
+            agent_id: ID of the failed agent to get context about.
+            thread_id: Thread ID of the failed workflow.
             
-            # This is a simplified version - real implementation would use Kafka
-            # For now, return empty list (no peers available in test mode)
+        Returns:
+            List of context responses from peer agents.
+        """
+        if not self.enable_peer_context:
             return []
+        
+        try:
+            from src.messaging.kafka_config import get_kafka_config
+            from src.messaging.producer import KafkaMessageProducer
+            from src.messaging.consumer import KafkaMessageConsumer
             
+            config = self._kafka_config or get_kafka_config()
+            requester_id = f"reconstructor-{agent_id}"
+            
+            # Create producer and publish request
+            async with KafkaMessageProducer(config) as producer:
+                success = await producer.publish_context_request(
+                    requester_id=requester_id,
+                    failed_agent_id=agent_id,
+                    thread_id=thread_id,
+                )
+                if not success:
+                    logger.warning("Failed to publish context request")
+                    return []
+            
+            # Create consumer on dedicated response topic
+            response_topic = config.get_response_topic(requester_id)
+            consumer = KafkaMessageConsumer(
+                topics=[response_topic],
+                group_id=f"reconstructor-{agent_id}-{thread_id[:8]}",
+                config=config,
+            )
+            
+            try:
+                await consumer.start()
+                # Collect responses within timeout
+                responses = await consumer.collect_messages(
+                    timeout=config.context_collection_timeout,
+                    message_type="PROVIDE_CONTEXT",
+                )
+                return responses
+            finally:
+                await consumer.stop()
+                
         except ImportError:
+            logger.debug("Kafka not available, skipping peer context")
+            return []
+        except Exception as e:
+            logger.warning(f"Failed to query peer context: {e}")
             return []
     
     def _combine_strategies(

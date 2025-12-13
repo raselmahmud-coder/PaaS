@@ -183,6 +183,71 @@ Agent A                    Agent B
 
 **Novelty**: First chaos engineering framework specifically targeting LLM agent workflows in e-commerce domain.
 
+### 8. CrewAI (Crew.AI Inc.)
+
+**What it is**: Task-based multi-agent framework with role delegation and collaboration patterns.
+
+**Source**: [CrewAI Documentation](https://www.crewai.io/)
+
+**Features**:
+- Role-based agent design (researcher, writer, analyst)
+- Task delegation and sequential/parallel execution
+- Memory system for context retention across tasks
+- Built-in tool integration
+
+**How it handles failures**:
+```python
+from crewai import Crew, Agent, Task
+
+# CrewAI's implicit recovery approach
+crew = Crew(
+    agents=[researcher, writer],
+    tasks=[research_task, write_task],
+    verbose=True,
+    # No explicit recovery configuration
+)
+
+# On failure, the task is typically re-run or skipped
+result = crew.kickoff()
+```
+
+**Limitations for fault tolerance**:
+- No explicit checkpoint/recovery mechanism
+- Recovery through task reassignment is implicit
+- No formal state reconstruction after agent failure
+- No peer context retrieval for state recovery
+- Cannot handle mid-task failures gracefully
+
+**Comparison with PaaS**: CrewAI focuses on task orchestration rather than fault tolerance. Our contribution adds:
+- Explicit state reconstruction via LLM + automata
+- Semantic handshake protocol for term alignment
+- Peer context retrieval for distributed state recovery
+- Detailed timing and accuracy metrics for recovery operations
+
+## Comparison with Modern Frameworks: Challenges
+
+**Why direct experimental comparison is difficult:**
+
+1. **AutoGen (Microsoft)**: Focuses on conversation recovery, not workflow state. The framework provides multi-agent conversation patterns but no equivalent to checkpoint + LLM reconstruction. Recovery relies on conversation history which may be incomplete.
+
+2. **CrewAI**: Uses task delegation, not explicit fault tolerance. Recovery is implicit through task reassignment rather than state reconstruction. No mechanism to recover partial progress within a task.
+
+3. **LangGraph**: Provides checkpointing (equivalent to our `checkpoint_only` baseline) but no intelligent reconstruction. The framework saves state after each node but cannot infer what happened between checkpoints.
+
+4. **LlamaIndex Workflows**: Focuses on RAG pipelines, not fault-tolerant agent systems. Recovery mechanisms are limited to retry policies without state inference.
+
+**Our contribution**: PaaS is the first framework to combine:
+- **Formal methods** (L* automata) for deterministic behavior prediction
+- **LLM reasoning** for complex state reconstruction
+- **Semantic alignment protocol** for ensuring term consistency between agents
+- **Peer context retrieval** for distributed state recovery
+
+No existing framework offers this combination, making direct apples-to-apples comparison challenging. Instead, we compare against:
+- Individual components (checkpoint-only, LLM-only, automata-only)
+- Industry-standard patterns (simple retry, exponential backoff, circuit breaker)
+
+This allows us to demonstrate the value of our hybrid approach over both traditional fault tolerance and modern LLM-based alternatives.
+
 ## Experimental Validation
 
 We compare all approaches using controlled experiments:

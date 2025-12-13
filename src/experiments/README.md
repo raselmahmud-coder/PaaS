@@ -122,7 +122,7 @@ results_by_condition = runner.run_full_experiment(runs_per_condition=300)
 Aggregates experiment metrics:
 
 ```python
-from src.experiments.collector import MetricsCollector, aggregate_metrics
+from src.experiments.collector import MetricsCollector
 
 collector = MetricsCollector()
 for result in results:

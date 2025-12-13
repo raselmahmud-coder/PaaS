@@ -23,6 +23,12 @@ class ConditionType(Enum):
     LLM_ONLY = "llm_only"
     # Real API validation
     REAL_API = "real_api"
+    # Phase B - Industry standard baselines
+    EXPONENTIAL_BACKOFF = "exponential_backoff"
+    CIRCUIT_BREAKER = "circuit_breaker"
+    SEMANTIC_ONLY = "semantic_only"
+    # Phase C - Ablation study
+    FULL_NO_SEMANTIC = "full_no_semantic"
 
 
 @dataclass
@@ -105,7 +111,22 @@ class ExperimentCondition(ABC):
     def get_reconstruction_strategy(self) -> str:
         """Get the reconstruction strategy for this condition."""
         if not self.config.resilience_enabled:
+            # Check for semantic-only (ablation) - no recovery but semantic enabled
+            if self.config.semantic_protocol_enabled:
+                return "semantic_only"
             return "none"
+        
+        # Check for Phase B/C condition types first (explicit type matching)
+        cond_type = self.config.condition_type
+        
+        if cond_type == ConditionType.EXPONENTIAL_BACKOFF:
+            return "exponential_backoff"
+        
+        if cond_type == ConditionType.CIRCUIT_BREAKER:
+            return "circuit_breaker"
+        
+        if cond_type == ConditionType.FULL_NO_SEMANTIC:
+            return "hybrid"
         
         # Check for specific comparison strategies
         if self.config.max_retries > 0 and not self.config.automata_enabled:
@@ -339,6 +360,199 @@ class RealAPICondition(ExperimentCondition):
         return True
 
 
+# =============================================================================
+# Phase B - Industry Standard Baselines
+# =============================================================================
+
+
+class ExponentialBackoffCondition(ExperimentCondition):
+    """Exponential backoff retry: Industry-standard fault tolerance.
+    
+    Retries with exponential delays: 100ms, 200ms, 400ms, 800ms + jitter.
+    No state reconstruction - just delayed retries.
+    
+    Literature: Google SRE Book, AWS Best Practices, Polly.NET.
+    Expected success rate: ~40% (only works for transient failures)
+    """
+    
+    def _get_config(self) -> ConditionConfig:
+        return ConditionConfig(
+            name="exponential_backoff",
+            condition_type=ConditionType.EXPONENTIAL_BACKOFF,
+            resilience_enabled=True,
+            semantic_protocol_enabled=False,
+            automata_enabled=False,
+            peer_context_enabled=False,
+            description="Exponential backoff (4 retries, 100-800ms + jitter)",
+            max_retries=4,
+            use_checkpoint_restart=False,
+            llm_fallback_enabled=False,
+        )
+    
+    def get_retry_delays(self) -> List[float]:
+        """Get retry delay sequence in seconds."""
+        import random
+        base = 0.1  # 100ms
+        delays = []
+        for i in range(4):
+            delay = base * (2 ** i)  # 0.1, 0.2, 0.4, 0.8
+            jitter = random.uniform(0, delay * 0.1)  # 10% jitter
+            delays.append(delay + jitter)
+        return delays
+
+
+class CircuitBreakerState:
+    """Track circuit breaker state across experiments.
+    
+    States: CLOSED (normal) -> OPEN (failing) -> HALF_OPEN (testing)
+    """
+    
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+    
+    def __init__(self, failure_threshold: int = 5, cooldown_seconds: float = 30.0):
+        self.state = self.CLOSED
+        self.failure_count = 0
+        self.failure_threshold = failure_threshold
+        self.cooldown_seconds = cooldown_seconds
+        self.last_failure_time: float = 0.0
+    
+    def record_failure(self) -> str:
+        """Record a failure and return new state."""
+        import time
+        self.failure_count += 1
+        self.last_failure_time = time.time()
+        
+        if self.failure_count >= self.failure_threshold:
+            self.state = self.OPEN
+        
+        return self.state
+    
+    def record_success(self) -> str:
+        """Record success and reset if in half-open."""
+        if self.state == self.HALF_OPEN:
+            self.state = self.CLOSED
+            self.failure_count = 0
+        return self.state
+    
+    def can_execute(self) -> bool:
+        """Check if request can proceed."""
+        import time
+        if self.state == self.CLOSED:
+            return True
+        
+        if self.state == self.OPEN:
+            # Check if cooldown passed
+            if time.time() - self.last_failure_time > self.cooldown_seconds:
+                self.state = self.HALF_OPEN
+                return True  # Allow one test request
+            return False
+        
+        # HALF_OPEN: allow request
+        return True
+    
+    def reset(self) -> None:
+        """Reset circuit breaker to initial state."""
+        self.state = self.CLOSED
+        self.failure_count = 0
+        self.last_failure_time = 0.0
+
+
+class CircuitBreakerCondition(ExperimentCondition):
+    """Circuit breaker pattern: Fail-fast on repeated failures.
+    
+    After N consecutive failures, circuit "opens" and rejects requests
+    for a cooldown period. Prevents cascade failures but doesn't recover state.
+    
+    Literature: Nygard (2018) "Release It!", Netflix Hystrix, Resilience4j.
+    Expected success rate: ~45% (fast-fails prevent some damage but no recovery)
+    """
+    
+    def __init__(self):
+        super().__init__()
+        self.circuit_state = CircuitBreakerState(failure_threshold=5, cooldown_seconds=30.0)
+    
+    def _get_config(self) -> ConditionConfig:
+        return ConditionConfig(
+            name="circuit_breaker",
+            condition_type=ConditionType.CIRCUIT_BREAKER,
+            resilience_enabled=True,
+            semantic_protocol_enabled=False,
+            automata_enabled=False,
+            peer_context_enabled=False,
+            description="Circuit breaker (5 failures -> 30s open)",
+            max_retries=0,
+            use_checkpoint_restart=False,
+            llm_fallback_enabled=False,
+        )
+    
+    def get_circuit_state(self) -> CircuitBreakerState:
+        """Get the circuit breaker state for this condition."""
+        return self.circuit_state
+
+
+# =============================================================================
+# Phase B - Ablation Study Condition
+# =============================================================================
+
+
+class SemanticOnlyCondition(ExperimentCondition):
+    """Semantic-only condition: Ablation study for semantic protocol.
+    
+    Enables semantic handshake for term alignment but disables all
+    recovery mechanisms. Tests whether semantic protocol alone
+    prevents failures through proactive alignment (rather than recovering).
+    
+    Purpose: Isolate semantic protocol's preventive contribution.
+    Expected result: Slightly better than baseline due to fewer misalignment failures.
+    """
+    
+    def _get_config(self) -> ConditionConfig:
+        return ConditionConfig(
+            name="semantic_only",
+            condition_type=ConditionType.SEMANTIC_ONLY,
+            resilience_enabled=False,  # NO recovery!
+            semantic_protocol_enabled=True,  # Only this enabled
+            automata_enabled=False,
+            peer_context_enabled=False,
+            description="Semantic handshake only - prevents but doesn't recover",
+            max_retries=0,
+            use_checkpoint_restart=False,
+            llm_fallback_enabled=False,
+        )
+
+
+# =============================================================================
+# Phase C - Ablation Study Condition
+# =============================================================================
+
+
+class FullNoSemanticCondition(ExperimentCondition):
+    """Full system WITHOUT semantic protocol - for ablation study.
+    
+    Enables all features except semantic handshake to isolate
+    the semantic protocol's contribution to overall success rate.
+    
+    Purpose: Compare full_system vs full_no_semantic to measure
+    semantic protocol's contribution.
+    """
+    
+    def _get_config(self) -> ConditionConfig:
+        return ConditionConfig(
+            name="full_no_semantic",
+            condition_type=ConditionType.FULL_NO_SEMANTIC,
+            resilience_enabled=True,
+            semantic_protocol_enabled=False,  # DISABLED for ablation
+            automata_enabled=True,
+            peer_context_enabled=True,
+            description="Full system minus semantic protocol (ablation)",
+            max_retries=0,
+            use_checkpoint_restart=False,
+            llm_fallback_enabled=True,
+        )
+
+
 # Registry of conditions
 CONDITION_REGISTRY: Dict[str, Type[ExperimentCondition]] = {
     # Original conditions
@@ -352,6 +566,13 @@ CONDITION_REGISTRY: Dict[str, Type[ExperimentCondition]] = {
     "llm_only": LLMOnlyCondition,
     # Real API validation
     "real_api": RealAPICondition,
+    # Phase B - Industry standard baselines
+    "exponential_backoff": ExponentialBackoffCondition,
+    "circuit_breaker": CircuitBreakerCondition,
+    # Phase B - Ablation study
+    "semantic_only": SemanticOnlyCondition,
+    # Phase C - Ablation study
+    "full_no_semantic": FullNoSemanticCondition,
 }
 
 

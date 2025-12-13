@@ -64,6 +64,50 @@ External validity refers to the generalizability of results beyond the experimen
 1. **Model Documentation**: Specific model versions and configurations are documented
 2. **Reproducible Configuration**: All settings stored in `.env.example` for replication
 
+### 2.4 Synthetic vs. Real API Performance Gap
+
+**Critical Finding**: Real API experiments reveal significant performance differences from synthetic simulations:
+
+| Metric | Synthetic | Real API (Shopify) | Difference |
+|--------|-----------|-------------------|------------|
+| Success Rate | ~95% | 86% | -9 percentage points |
+| MTTR | 0.14s | 22.4s | 160x slower |
+| Recovery Rate | ~92% | 100% | +8 percentage points |
+
+**Explanation of the 160x MTTR Difference:**
+
+The substantial MTTR gap between synthetic and real API experiments reflects:
+
+1. **Real Network Latency** (~100-500ms per API call)
+   - Synthetic experiments use simulated delays
+   - Real experiments incur actual network round-trip times to Shopify servers
+
+2. **Shopify API Response Time** (~200-1000ms per operation)
+   - Product creation, updates, and queries involve database operations
+   - Rate limiting adds additional wait time between requests
+
+3. **LLM Inference Time** (~1-5s per reconstruction call)
+   - Real API experiments invoke actual LLM for state reconstruction
+   - Token generation and processing adds significant latency
+
+4. **No Parallelization**
+   - Current implementation processes steps sequentially
+   - Real-world deployment could benefit from parallel API calls
+
+**Implications for Interpreting Results:**
+
+1. **Relative Comparisons Remain Valid**: The synthetic results provide meaningful *relative* comparisons between conditions (baseline vs. reconstruction vs. full system). The performance gaps and improvement percentages translate to real-world scenarios.
+
+2. **Absolute Values Require Caution**: Synthetic MTTR values (0.1-0.2s) should not be taken as real-world predictions. Real deployments will experience significantly longer recovery times.
+
+3. **Optimization Opportunities**: The timing breakdown suggests that real-world deployment would benefit from:
+   - Connection pooling and keep-alive for API calls
+   - Caching of frequently accessed data
+   - Parallelization of independent operations
+   - Local LLM deployment for reduced inference latency
+
+4. **Success Rate Convergence**: Despite the MTTR gap, success rates are relatively close (86% vs 95%), suggesting the recovery mechanisms are effective in real environments.
+
 ## 3. Construct Validity
 
 Construct validity refers to whether the measured metrics actually capture the intended concepts.

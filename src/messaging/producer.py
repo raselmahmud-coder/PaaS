@@ -32,14 +32,19 @@ class KafkaMessageProducer:
         try:
             from aiokafka import AIOKafkaProducer
             
+            # Use longer timeout for bootstrap (Docker Desktop on Windows needs ~40s)
+            # request_timeout_ms affects bootstrap, so use at least 60s
+            bootstrap_timeout_ms = max(60000, int(self.config.producer_timeout * 1000))
+            
             self._producer = AIOKafkaProducer(
                 bootstrap_servers=self.config.bootstrap_servers,
                 value_serializer=lambda v: json.dumps(v, default=str).encode("utf-8"),
                 key_serializer=lambda k: k.encode("utf-8") if k else None,
                 max_request_size=self.config.max_message_size,
-                request_timeout_ms=int(self.config.producer_timeout * 1000),
+                request_timeout_ms=bootstrap_timeout_ms,
                 retry_backoff_ms=self.config.retry_backoff_ms,
             )
+            
             await self._producer.start()
             self._started = True
             logger.info(f"Kafka producer started, connected to {self.config.bootstrap_servers}")

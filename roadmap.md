@@ -1,4 +1,8 @@
-# Implementation Roadmap Architecture of Protocol-Aware Agentic Swarm (PaaS) for  E-Commerce Vendor
+# Thesis title: The Design of an Adaptive Resilience Autonomous Agentic AI System
+
+---
+
+# Thesis implementation Roadmap Architecture of Protocol-Aware Agentic Swarm (PaaS) for  E-Commerce Vendor
 
 ## Core Feature Priority Ranking (MVP-First Approach)
 

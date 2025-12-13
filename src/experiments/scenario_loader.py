@@ -71,6 +71,42 @@ class ScenarioStep:
 
 
 @dataclass
+class CascadeConfig:
+    """Configuration for cascade failure behavior.
+    
+    When enabled, a failure at the trigger step can propagate to downstream
+    steps with a specified probability, simulating real-world cascade failures.
+    """
+    
+    enabled: bool = False
+    trigger_step: int = 0  # Step index that triggers cascade
+    downstream_probability: float = 0.7  # Probability cascade propagates to next step
+    max_depth: int = 2  # Maximum number of steps the cascade can propagate
+    delay_between_failures_ms: int = 100  # Simulated delay between cascading failures
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "CascadeConfig":
+        """Create from dictionary."""
+        return cls(
+            enabled=data.get("enabled", False),
+            trigger_step=data.get("trigger_step", 0),
+            downstream_probability=data.get("downstream_probability", 0.7),
+            max_depth=data.get("max_depth", 2),
+            delay_between_failures_ms=data.get("delay_between_failures_ms", 100),
+        )
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "enabled": self.enabled,
+            "trigger_step": self.trigger_step,
+            "downstream_probability": self.downstream_probability,
+            "max_depth": self.max_depth,
+            "delay_between_failures_ms": self.delay_between_failures_ms,
+        }
+
+
+@dataclass
 class FailureInjectionConfig:
     """Configuration for failure injection."""
     
@@ -78,16 +114,39 @@ class FailureInjectionConfig:
     probability: float = 0.3
     target_steps: List[int] = field(default_factory=list)
     failure_types: List[str] = field(default_factory=lambda: ["crash", "timeout"])
+    cascade: Optional[CascadeConfig] = None  # Cascade failure configuration
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "FailureInjectionConfig":
         """Create from dictionary."""
+        # Parse cascade config if present
+        cascade = None
+        if "cascade" in data:
+            cascade = CascadeConfig.from_dict(data["cascade"])
+        
         return cls(
             enabled=data.get("enabled", True),
             probability=data.get("probability", 0.3),
             target_steps=data.get("target_steps", []),
             failure_types=data.get("failure_types", ["crash", "timeout"]),
+            cascade=cascade,
         )
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        result = {
+            "enabled": self.enabled,
+            "probability": self.probability,
+            "target_steps": self.target_steps,
+            "failure_types": self.failure_types,
+        }
+        if self.cascade:
+            result["cascade"] = self.cascade.to_dict()
+        return result
+    
+    def has_cascade(self) -> bool:
+        """Check if cascade failure is configured."""
+        return self.cascade is not None and self.cascade.enabled
 
 
 @dataclass
@@ -151,11 +210,7 @@ class Scenario:
             "version": self.version,
             "agents": self.agents,
             "steps": steps_data,
-            "failure_injection": {
-                "enabled": self.failure_injection.enabled,
-                "probability": self.failure_injection.probability,
-                "target_steps": self.failure_injection.target_steps,
-            },
+            "failure_injection": self.failure_injection.to_dict(),
             "initial_state": self.initial_state,
             "success_criteria": self.success_criteria,
         }

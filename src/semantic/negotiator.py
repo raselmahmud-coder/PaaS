@@ -87,7 +87,8 @@ Explanation:"""
         self._llm = llm
         self.max_rounds = max_rounds
         self.fallback_strategy = fallback_strategy
-        self._initialized = False
+        # Mark as initialized if LLM was provided via constructor
+        self._initialized = llm is not None
     
     def _ensure_llm(self) -> None:
         """Ensure LLM is available."""

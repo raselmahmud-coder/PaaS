@@ -1,0 +1,148 @@
+name: Cascade Failure Test
+description: Test recovery when failures propagate across dependent agents in a multi-agent workflow
+complexity: high
+version: "1.0"
+
+agents:
+  - id: coordinator
+    type: coordinator
+  - id: product-agent-1
+    type: product_upload
+  - id: product-agent-2
+    type: product_upload
+  - id: marketing-agent
+    type: marketing
+
+steps:
+  - name: initialize_batch
+    agent: coordinator
+    action: initialize
+    expected_status: initialized
+    timeout_seconds: 10
+    term_conflicts:
+      terms: ["batch_id", "job_id", "task_group"]
+      probability: 0.20
+      severity: low
+
+  - name: validate_products_batch1
+    agent: product-agent-1
+    action: validate
+    expected_status: validated
+    timeout_seconds: 30
+    config:
+      batch_number: 1
+      depends_on: initialize_batch
+    term_conflicts:
+      terms: ["validation_status", "check_result"]
+      probability: 0.30
+      severity: medium
+
+  - name: validate_products_batch2
+    agent: product-agent-2
+    action: validate
+    expected_status: validated
+    timeout_seconds: 30
+    config:
+      batch_number: 2
+      depends_on: initialize_batch
+    term_conflicts:
+      terms: ["validation_status", "check_result"]
+      probability: 0.30
+      severity: medium
+
+  - name: upload_batch1
+    agent: product-agent-1
+    action: upload
+    expected_status: uploaded
+    timeout_seconds: 60
+    config:
+      depends_on: validate_products_batch1
+      causes_downstream: true
+    term_conflicts:
+      terms: ["upload_result", "storage_status"]
+      probability: 0.35
+      severity: high
+
+  - name: upload_batch2
+    agent: product-agent-2
+    action: upload
+    expected_status: uploaded
+    timeout_seconds: 60
+    config:
+      depends_on: validate_products_batch2
+      causes_downstream: true
+    term_conflicts:
+      terms: ["upload_result", "storage_status"]
+      probability: 0.35
+      severity: high
+
+  - name: aggregate_results
+    agent: coordinator
+    action: aggregate
+    expected_status: aggregated
+    timeout_seconds: 30
+    config:
+      depends_on: [upload_batch1, upload_batch2]
+    term_conflicts:
+      terms: ["aggregate_count", "total_processed", "batch_summary"]
+      probability: 0.40
+      severity: high
+
+  - name: handoff_to_marketing
+    agent: coordinator
+    action: handoff
+    expected_status: handoff_complete
+    target_agent: marketing-agent
+    timeout_seconds: 15
+    term_conflicts:
+      terms: ["product_list", "item_catalog"]
+      probability: 0.35
+      severity: medium
+
+  - name: generate_campaign
+    agent: marketing-agent
+    action: generate_campaign
+    expected_status: campaign_created
+    timeout_seconds: 60
+    config:
+      campaign_type: product_launch
+    term_conflicts:
+      terms: ["campaign_template", "ad_format"]
+      probability: 0.25
+      severity: low
+
+failure_injection:
+  enabled: true
+  probability: 0.40
+  target_steps: [1, 3, 4, 5]
+  failure_types:
+    - crash
+    - timeout
+    - message_corruption
+  cascade:
+    enabled: true
+    trigger_step: 3
+    downstream_probability: 0.70
+    max_depth: 2
+    delay_between_failures_ms: 150
+
+initial_state:
+  task_id: "cascade-test-{{run_id}}"
+  batch_data:
+    total_products: 100
+    batch_size: 50
+    priority: high
+  products:
+    - id: "prod-001"
+      name: "Test Product 1"
+      price: 29.99
+    - id: "prod-002"
+      name: "Test Product 2"
+      price: 49.99
+
+success_criteria:
+  final_status: campaign_created
+  all_steps_executed: true
+  recovery_required: true
+  max_cascade_depth: 2
+

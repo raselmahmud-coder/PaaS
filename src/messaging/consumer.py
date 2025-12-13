@@ -246,6 +246,65 @@ class KafkaMessageConsumer:
                 messages.append(record.value)
         
         return messages
+
+    async def consume_once(self, timeout: float = 5.0) -> List[Dict[str, Any]]:
+        """Consume messages once with a timeout.
+        
+        This is useful for testing - consumes available messages within timeout
+        and invokes registered handlers.
+        
+        Args:
+            timeout: Maximum time to wait for messages (seconds).
+            
+        Returns:
+            List of consumed message values.
+        """
+        if not self._started:
+            await self.start()
+        
+        if self._consumer is None:
+            # Mock mode
+            logger.info(f"[MOCK] consume_once called with timeout={timeout}")
+            await asyncio.sleep(min(timeout, 0.1))
+            return []
+        
+        consumed = []
+        start_time = asyncio.get_event_loop().time()
+        
+        while True:
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed >= timeout:
+                break
+            
+            remaining = timeout - elapsed
+            try:
+                data = await asyncio.wait_for(
+                    self._consumer.getmany(timeout_ms=int(min(remaining, 1.0) * 1000)),
+                    timeout=remaining + 1.0,
+                )
+                
+                for tp, records in data.items():
+                    for record in records:
+                        msg = record.value
+                        consumed.append(msg)
+                        # Invoke handlers
+                        msg_type = msg.get("type") or msg.get("message_type")
+                        if msg_type and msg_type in self._handlers:
+                            for handler in self._handlers[msg_type]:
+                                try:
+                                    await handler(msg)
+                                except Exception as e:
+                                    logger.error(f"Handler error: {e}")
+                
+                # If we got messages, return them
+                if consumed:
+                    break
+                    
+            except asyncio.TimeoutError:
+                continue
+        
+        logger.debug(f"consume_once returned {len(consumed)} messages")
+        return consumed
     
     async def __aenter__(self):
         """Async context manager entry."""

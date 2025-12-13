@@ -153,7 +153,7 @@ class ExperimentExporter:
         Returns:
             Path to created file.
         """
-        from src.experiments.collector import aggregate_metrics
+        from src.experiments.collector import MetricsCollector
         
         file_path = self.summary_dir / f"{filename}.csv"
         
@@ -172,7 +172,10 @@ class ExperimentExporter:
             writer.writeheader()
             
             for condition_name, results in results_by_condition.items():
-                metrics = aggregate_metrics(results)
+                collector = MetricsCollector()
+                for result in results:
+                    collector.record_result(result)
+                metrics = collector.get_metrics()
                 
                 row = {
                     "condition": condition_name,

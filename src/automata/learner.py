@@ -6,7 +6,16 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from src.automata.sul import AgentBehaviorSUL, EventSequence, create_sul_from_events
+from src.automata.sul import (
+    AgentBehaviorSUL,
+    AbstractionSUL,
+    EventSequence,
+    create_sul_from_events,
+    create_abstraction_sul_from_events,
+    abstract_action,
+    abstract_sequence,
+    ABSTRACT_ALPHABET,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +63,7 @@ class AutomataLearner:
         eq_oracle_type: str = "random_walk",
         max_learning_rounds: int = 100,
         random_walk_steps: int = 5000,
+        use_abstraction: bool = False,
     ):
         """Initialize the learner.
         
@@ -62,14 +72,17 @@ class AutomataLearner:
             eq_oracle_type: Equivalence oracle type ("random_walk", "w_method").
             max_learning_rounds: Maximum learning rounds.
             random_walk_steps: Number of steps for random walk oracle.
+            use_abstraction: If True, use AbstractionSUL for generalization.
+                            If False, use AgentBehaviorSUL (memorization).
         """
         self.model_type = model_type
         self.eq_oracle_type = eq_oracle_type
         self.max_learning_rounds = max_learning_rounds
         self.random_walk_steps = random_walk_steps
+        self.use_abstraction = use_abstraction
         
         self._learned_model = None
-        self._sul: Optional[AgentBehaviorSUL] = None
+        self._sul = None  # Can be AgentBehaviorSUL or AbstractionSUL
     
     def learn(
         self,
@@ -97,15 +110,31 @@ class AutomataLearner:
             )
         
         try:
-            # Create SUL from events
-            self._sul = create_sul_from_events(events, agent_id)
+            # Create SUL from events (abstraction or concrete)
+            if self.use_abstraction:
+                self._sul = create_abstraction_sul_from_events(events, agent_id)
+                logger.info(f"Using AbstractionSUL for generalization (alphabet: {len(ABSTRACT_ALPHABET)} symbols)")
+            else:
+                self._sul = create_sul_from_events(events, agent_id)
+                logger.info("Using AgentBehaviorSUL (concrete, memorization mode)")
             
             # Try to use AALpy for learning
             try:
                 result = self._learn_with_aalpy()
-            except (ImportError, TypeError, AttributeError) as aalpy_error:
-                # AALpy not available or has API compatibility issues, use fallback
-                logger.warning(f"AALpy learning failed ({aalpy_error}), using simple automaton")
+                logger.info(f"Successfully learned automaton using AALpy L*: {result.num_states} states, {result.num_transitions} transitions")
+            except ImportError as import_error:
+                # AALpy not available, use fallback
+                logger.warning(f"AALpy not available: {import_error}. Using simple automaton fallback.")
+                result = self._learn_simple()
+            except (TypeError, AttributeError) as api_error:
+                # AALpy API compatibility issues, use fallback
+                logger.warning(f"AALpy API compatibility issue: {api_error}. Using simple automaton fallback.")
+                logger.debug(f"Full traceback:", exc_info=True)
+                result = self._learn_simple()
+            except Exception as aalpy_error:
+                # Other AALpy errors - log full details for diagnosis
+                logger.error(f"AALpy learning failed with unexpected error: {aalpy_error}", exc_info=True)
+                logger.warning("Falling back to simple automaton")
                 result = self._learn_simple()
             
         except ImportError:
@@ -128,16 +157,20 @@ class AutomataLearner:
     
     def _learn_with_aalpy(self) -> LearningResult:
         """Learn using AALpy L* algorithm."""
-        from aalpy.SULs import MealySUL
+        from aalpy.base.SUL import SUL
         from aalpy.oracles import RandomWalkEqOracle
         from aalpy.learning_algs import run_Lstar
         
+        logger.info(f"Starting AALpy L* learning with model_type={self.model_type}, random_walk_steps={self.random_walk_steps}")
+        
         # Create AALpy-compatible SUL wrapper
-        class AALpySULWrapper(MealySUL):
+        class AALpySULWrapper(SUL):
             def __init__(wrapper_self, sul: AgentBehaviorSUL):
                 super().__init__()
                 wrapper_self.sul = sul
-                wrapper_self.input_alphabet = sul.input_alphabet
+                # Ensure input_alphabet is a list (not tuple or other iterable)
+                wrapper_self.input_alphabet = list(sul.input_alphabet) if sul.input_alphabet else []
+                logger.debug(f"AALpySULWrapper initialized with {len(wrapper_self.input_alphabet)} input symbols")
             
             def pre(wrapper_self):
                 wrapper_self.sul.pre()
@@ -151,30 +184,38 @@ class AutomataLearner:
         # Wrap our SUL
         aalpy_sul = AALpySULWrapper(self._sul)
         
-        # Create equivalence oracle - try different API signatures for compatibility
+        if not aalpy_sul.input_alphabet:
+            raise ValueError("Input alphabet is empty - cannot learn automaton")
+        
+        logger.debug(f"Input alphabet: {aalpy_sul.input_alphabet[:10]}..." if len(aalpy_sul.input_alphabet) > 10 else f"Input alphabet: {aalpy_sul.input_alphabet}")
+        
+        # Create equivalence oracle
+        # AALpy RandomWalkEqOracle signature: (alphabet: list, sul: SUL, num_steps=...)
         try:
-            # Try newer AALpy API (sul, alphabet, num_steps)
-            eq_oracle = RandomWalkEqOracle(
-                aalpy_sul,
-                aalpy_sul.input_alphabet,
-                num_steps=self.random_walk_steps,
-            )
-        except TypeError:
-            # Fall back to older API (alphabet, sul, num_steps)
             eq_oracle = RandomWalkEqOracle(
                 aalpy_sul.input_alphabet,
                 aalpy_sul,
                 num_steps=self.random_walk_steps,
             )
+            logger.debug("Equivalence oracle created successfully")
+        except Exception as e:
+            logger.error(f"Failed to create equivalence oracle: {e}")
+            raise
         
         # Run L* learning
-        learned_automaton = run_Lstar(
-            aalpy_sul.input_alphabet,
-            aalpy_sul,
-            eq_oracle,
-            automaton_type=self.model_type,
-            print_level=0,
-        )
+        try:
+            logger.info("Running L* learning algorithm...")
+            learned_automaton = run_Lstar(
+                aalpy_sul.input_alphabet,
+                aalpy_sul,
+                eq_oracle,
+                automaton_type=self.model_type,
+                print_level=0,  # Suppress AALpy's default output
+            )
+            logger.info("L* learning completed successfully")
+        except Exception as e:
+            logger.error(f"L* learning algorithm failed: {e}")
+            raise
         
         self._learned_model = learned_automaton
         
@@ -184,11 +225,20 @@ class AutomataLearner:
             len(s.transitions) for s in learned_automaton.states
         ) if hasattr(learned_automaton, 'states') else 0
         
+        # Try to get query counts from the learned automaton if available
+        queries_made = getattr(learned_automaton, 'queries_made', 0)
+        equivalence_queries = getattr(learned_automaton, 'equivalence_queries', 0)
+        
+        logger.info(f"Learned automaton: {num_states} states, {num_transitions} transitions, "
+                   f"{queries_made} membership queries, {equivalence_queries} equivalence queries")
+        
         return LearningResult(
             success=True,
             num_states=num_states,
             num_transitions=num_transitions,
             learning_time_ms=0,  # Will be set by caller
+            queries_made=queries_made,
+            equivalence_queries=equivalence_queries,
             model_type=self.model_type,
             automaton=learned_automaton,
         )

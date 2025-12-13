@@ -5,7 +5,7 @@ import random
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,7 @@ class SyntheticEventGenerator:
         num_workflows: int = 50,
         agent_id: str = "product-agent-1",
         include_failures: bool = True,
+        workflow_type: str = "product",
     ) -> List[Dict[str, Any]]:
         """Generate events from complete workflow executions.
         
@@ -94,6 +95,7 @@ class SyntheticEventGenerator:
             num_workflows: Number of workflows to simulate.
             agent_id: Agent ID for events.
             include_failures: Whether to include failure scenarios.
+            workflow_type: Type of workflow - "product" or "marketing" (for OOD testing).
             
         Returns:
             List of event dictionaries.
@@ -101,17 +103,27 @@ class SyntheticEventGenerator:
         all_events = []
         base_time = datetime.utcnow()
         
+        # Select workflow steps based on type
+        if workflow_type == "marketing":
+            workflow_steps = self.MARKETING_WORKFLOW_STEPS
+            task_name = "marketing_campaign"
+        else:
+            workflow_steps = self.PRODUCT_WORKFLOW_STEPS
+            task_name = "product_upload"
+        
         for i in range(num_workflows):
-            thread_id = f"workflow-{i:04d}"
+            thread_id = f"{workflow_type}-workflow-{i:04d}"
             events = self._generate_single_workflow(
                 agent_id=agent_id,
                 thread_id=thread_id,
                 base_time=base_time + timedelta(minutes=i * 5),
                 include_failure=include_failures and random.random() < self.failure_probability,
+                workflow_steps=workflow_steps,
+                task_name=task_name,
             )
             all_events.extend(events)
         
-        logger.info(f"Generated {len(all_events)} events from {num_workflows} workflows")
+        logger.info(f"Generated {len(all_events)} events from {num_workflows} {workflow_type} workflows")
         return all_events
     
     def _generate_single_workflow(
@@ -120,8 +132,19 @@ class SyntheticEventGenerator:
         thread_id: str,
         base_time: datetime,
         include_failure: bool = False,
+        workflow_steps: Optional[List[Tuple[str, str]]] = None,
+        task_name: str = "product_upload",
     ) -> List[Dict[str, Any]]:
-        """Generate events for a single workflow execution."""
+        """Generate events for a single workflow execution.
+        
+        Args:
+            agent_id: Agent ID for events.
+            thread_id: Thread ID for the workflow.
+            base_time: Base timestamp for events.
+            include_failure: Whether to include a failure scenario.
+            workflow_steps: List of (action, status) tuples. Uses PRODUCT_WORKFLOW_STEPS if None.
+            task_name: Name of the task (for TASK_ASSIGN/TASK_COMPLETE events).
+        """
         events = []
         current_time = base_time
         
@@ -130,7 +153,7 @@ class SyntheticEventGenerator:
             agent_id=agent_id,
             thread_id=thread_id,
             action_type="TASK_ASSIGN",
-            input_data={"task": "product_upload"},
+            input_data={"task": task_name},
             output_data={"status": "in_progress"},
             timestamp=current_time,
         ).to_dict())
@@ -138,7 +161,7 @@ class SyntheticEventGenerator:
         current_time += timedelta(seconds=1)
         
         # Choose workflow steps
-        steps = self.PRODUCT_WORKFLOW_STEPS
+        steps = workflow_steps or self.PRODUCT_WORKFLOW_STEPS
         
         # Determine failure point if including failure
         failure_step = -1
@@ -212,7 +235,7 @@ class SyntheticEventGenerator:
             agent_id=agent_id,
             thread_id=thread_id,
             action_type="TASK_COMPLETE",
-            input_data={"workflow": "product_upload"},
+            input_data={"workflow": task_name},
             output_data={"status": "completed"},
             timestamp=current_time,
         ).to_dict())
@@ -329,6 +352,119 @@ class SyntheticEventGenerator:
         
         logger.info(f"Generated {len(events)} context request events")
         return events
+    
+    def generate_novel_sequences(
+        self,
+        num_sequences: int = 20,
+        agent_id: str = "test-agent-1",
+        sequence_type: str = "valid_partial",
+    ) -> List[Dict[str, Any]]:
+        """Generate novel sequences for out-of-distribution testing.
+        
+        Creates sequences that test generalization:
+        - valid_partial: Valid structure but incomplete workflows
+        - valid_reordered: Valid actions but in different order
+        - invalid_mixed: Mix of valid and invalid action combinations
+        
+        Args:
+            num_sequences: Number of novel sequences to generate.
+            agent_id: Agent ID for events.
+            sequence_type: Type of novel sequence - "valid_partial", "valid_reordered", or "invalid_mixed".
+            
+        Returns:
+            List of event dictionaries.
+        """
+        all_events = []
+        base_time = datetime.utcnow()
+        
+        # All possible actions from both workflow types
+        all_actions = [
+            action for action, _ in self.PRODUCT_WORKFLOW_STEPS + self.MARKETING_WORKFLOW_STEPS
+        ]
+        
+        for i in range(num_sequences):
+            thread_id = f"novel-{sequence_type}-{i:04d}"
+            current_time = base_time + timedelta(minutes=i * 2)
+            
+            # Start with TASK_ASSIGN
+            events = [GeneratedEvent(
+                agent_id=agent_id,
+                thread_id=thread_id,
+                action_type="TASK_ASSIGN",
+                input_data={"task": "novel_test"},
+                output_data={"status": "in_progress"},
+                timestamp=current_time,
+            ).to_dict()]
+            
+            current_time += timedelta(seconds=1)
+            
+            if sequence_type == "valid_partial":
+                # Valid structure but incomplete (e.g., only first 2 steps)
+                steps = random.choice([
+                    self.PRODUCT_WORKFLOW_STEPS[:2],
+                    self.MARKETING_WORKFLOW_STEPS[:2],
+                ])
+                for action, status in steps:
+                    events.append(GeneratedEvent(
+                        agent_id=agent_id,
+                        thread_id=thread_id,
+                        action_type=action,
+                        input_data={"step": "partial"},
+                        output_data={"status": status},
+                        timestamp=current_time,
+                    ).to_dict())
+                    current_time += timedelta(seconds=random.uniform(1, 2))
+                # No TASK_COMPLETE - incomplete workflow
+                
+            elif sequence_type == "valid_reordered":
+                # Valid actions but in wrong order (should have lower confidence)
+                steps = list(self.PRODUCT_WORKFLOW_STEPS)
+                random.shuffle(steps)  # Reorder
+                for action, status in steps:
+                    events.append(GeneratedEvent(
+                        agent_id=agent_id,
+                        thread_id=thread_id,
+                        action_type=action,
+                        input_data={"step": "reordered"},
+                        output_data={"status": status},
+                        timestamp=current_time,
+                    ).to_dict())
+                    current_time += timedelta(seconds=random.uniform(1, 2))
+                events.append(GeneratedEvent(
+                    agent_id=agent_id,
+                    thread_id=thread_id,
+                    action_type="TASK_COMPLETE",
+                    input_data={"workflow": "reordered"},
+                    output_data={"status": "completed"},
+                    timestamp=current_time,
+                ).to_dict())
+                
+            elif sequence_type == "invalid_mixed":
+                # Mix actions from different workflow types (invalid combination)
+                mixed_actions = random.sample(all_actions, k=min(3, len(all_actions)))
+                for action in mixed_actions:
+                    events.append(GeneratedEvent(
+                        agent_id=agent_id,
+                        thread_id=thread_id,
+                        action_type=action,
+                        input_data={"step": "mixed"},
+                        output_data={"status": "unknown"},
+                        timestamp=current_time,
+                    ).to_dict())
+                    current_time += timedelta(seconds=random.uniform(1, 2))
+                events.append(GeneratedEvent(
+                    agent_id=agent_id,
+                    thread_id=thread_id,
+                    action_type="TASK_COMPLETE",
+                    input_data={"workflow": "mixed"},
+                    output_data={"status": "completed"},
+                    timestamp=current_time,
+                ).to_dict())
+            
+            all_events.extend(events)
+        
+        logger.info(f"Generated {len(all_events)} events from {num_sequences} novel {sequence_type} sequences")
+        return all_events
     
     def generate_training_dataset(
         self,

@@ -6,7 +6,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.automata.learner import AutomataLearner, LearningResult
+from src.automata.learner import AutomataLearner, LearningResult, SimpleAutomaton
+from src.automata.sul import abstract_action, abstract_sequence, AbstractionSUL, ABSTRACT_ALPHABET
 
 logger = logging.getLogger(__name__)
 
@@ -133,115 +134,239 @@ class BehaviorPredictor:
                 reasoning="No trained model available",
             )
         
-        # Get prediction from learned model
-        predicted_output = self.learner.predict_next_output(recent_actions)
+        # For sequence learning model: output of input[i] is input[i+1]
+        # So we need to execute the sequence and get the output of the last action
+        # which represents the next action after the sequence
         
-        if predicted_output is None or predicted_output == "unknown":
+        model = self.learner.get_model()
+        if model is None:
             return self._fallback_prediction(recent_actions, current_status)
         
-        # Determine action from output
-        predicted_action = self._output_to_action(predicted_output, recent_actions)
+        # Check if using abstraction mode
+        use_abstraction = getattr(self.learner, 'use_abstraction', False)
+        
+        # Abstract input sequence if in abstraction mode
+        if use_abstraction:
+            query_sequence = abstract_sequence(recent_actions)
+        else:
+            query_sequence = recent_actions
+        
+        # Execute the sequence to get to current state, then get next output
+        predicted_action = None
+        
+        if isinstance(model, SimpleAutomaton):
+            # SimpleAutomaton: execute sequence and get last output
+            model.reset()
+            for inp in query_sequence:
+                output = model.step(inp)
+            # The output of the last action is the next action
+            predicted_action = output
+        elif hasattr(model, 'execute_sequence'):
+            # AALpy model: execute sequence and get last output
+            try:
+                model.reset_to_initial()
+                # AALpy execute_sequence takes (initial_state, input_sequence)
+                outputs = model.execute_sequence(model.initial_state, query_sequence)
+                predicted_action = outputs[-1] if outputs else None
+            except KeyError as e:
+                # Action not in learned automaton's alphabet - OOD input
+                logger.debug(f"AALpy model doesn't know action: {e}")
+                predicted_action = None
+        else:
+            # Fallback: use learner's method
+            predicted_action = self.learner.predict_next_output(query_sequence)
+        
+        if predicted_action is None or predicted_action == "unknown" or predicted_action == "TERMINAL":
+            return self._fallback_prediction(recent_actions, current_status)
+        
+        # Infer status from predicted action
+        predicted_status = self.ACTION_STATUS_MAP.get(predicted_action, "in_progress")
         
         # Calculate confidence
         confidence, confidence_score = self._calculate_confidence(
-            recent_actions, predicted_output
+            recent_actions, predicted_action
         )
         
-        # Get alternatives
+        # Get alternatives (from transition table)
         alternatives = self._get_alternative_predictions(recent_actions)
         
         return Prediction(
             predicted_action=predicted_action,
-            predicted_status=predicted_output,
+            predicted_status=predicted_status,
             confidence=confidence,
             confidence_score=confidence_score,
             input_sequence=recent_actions,
             alternative_actions=alternatives,
-            reasoning=f"Predicted based on {len(recent_actions)} recent actions",
+            reasoning=f"Predicted sequence based on {len(recent_actions)} recent actions",
         )
     
-    def _output_to_action(
-        self,
-        output: str,
-        recent_actions: List[str],
-    ) -> str:
-        """Map output status to predicted action."""
-        # Reverse lookup from ACTION_STATUS_MAP
-        for action, status in self.ACTION_STATUS_MAP.items():
-            if status == output:
-                return action
-        
-        # Infer from recent actions
-        if recent_actions:
-            last_action = recent_actions[-1]
-            
-            # Predict next step in workflow
-            workflow_sequence = [
-                "validate_product_data",
-                "generate_listing",
-                "confirm_upload",
-            ]
-            
-            if last_action in workflow_sequence:
-                idx = workflow_sequence.index(last_action)
-                if idx < len(workflow_sequence) - 1:
-                    return workflow_sequence[idx + 1]
-        
-        return "continue"
+    def _output_to_action(self, output: str, recent_actions: List[str]) -> str:
+        """Legacy method, no longer needed as output IS the action."""
+        return output
     
     def _calculate_confidence(
         self,
         input_sequence: List[str],
-        predicted_output: str,
+        predicted_action: str,
     ) -> Tuple[PredictionConfidence, float]:
-        """Calculate prediction confidence."""
-        if not self._event_history:
-            return PredictionConfidence.LOW, 0.3
+        """Calculate calibrated confidence that distinguishes memorization from generalization.
         
-        # Count how many times this pattern appears in training data
-        pattern_count = 0
+        Confidence levels:
+        - HIGH: Exact sequence seen in training AND automaton predicts correctly (memorization)
+        - MEDIUM: Prefix seen, suffix extrapolated via learned automaton (partial generalization)
+        - LOW: Sequence not in training, pure automaton generalization (full generalization)
+        - UNKNOWN: No valid transition exists in automaton
+        
+        Args:
+            input_sequence: Sequence of actions leading to prediction.
+            predicted_action: The predicted next action.
+            
+        Returns:
+            Tuple of (confidence_level, confidence_score).
+        """
+        if not self._event_history:
+            return PredictionConfidence.UNKNOWN, 0.0
+        
+        # Check if exact sequence + prediction was seen in training (memorization)
+        exact_match_count = 0
+        prefix_match_count = 0
         total_sequences = 0
         
-        for event in self._event_history:
-            action = event.get("action_type", "")
-            if action in input_sequence:
-                total_sequences += 1
-                output = event.get("output_data", {})
-                if isinstance(output, dict) and output.get("status") == predicted_output:
-                    pattern_count += 1
+        for event_seq in self._group_events_by_thread():
+            actions = [e.get("action_type", "") for e in event_seq]
+            
+            # Check for exact sequence match (memorization)
+            for i in range(len(actions) - len(input_sequence)):
+                if actions[i:i+len(input_sequence)] == input_sequence:
+                    total_sequences += 1
+                    # Check if next action matches prediction
+                    if i + len(input_sequence) < len(actions):
+                        next_action = actions[i+len(input_sequence)]
+                        if next_action == predicted_action:
+                            exact_match_count += 1
+                    
+                    # Check if prefix matches (for partial generalization)
+                    if len(input_sequence) > 1:
+                        prefix = input_sequence[:-1]
+                        if i + len(prefix) < len(actions) and actions[i:i+len(prefix)] == prefix:
+                            prefix_match_count += 1
         
+        # Check if automaton has a valid transition (even if not in training)
+        has_valid_transition = False
+        model = self.learner.get_model() if self.learner else None
+        if model:
+            try:
+                # Try to execute the sequence and see if we get a valid prediction
+                if isinstance(model, SimpleAutomaton):
+                    model.reset()
+                    for inp in input_sequence:
+                        output = model.step(inp)
+                    # If we got here without error, transition exists
+                    has_valid_transition = (output != "unknown" and output != "TERMINAL")
+                elif hasattr(model, 'execute_sequence'):
+                    model.reset_to_initial()
+                    outputs = model.execute_sequence(model.initial_state, input_sequence)
+                    has_valid_transition = (outputs and outputs[-1] not in ("unknown", "TERMINAL"))
+            except Exception:
+                has_valid_transition = False
+        
+        # Determine confidence level
         if total_sequences == 0:
+            # No training data match - check if automaton can generalize
+            if has_valid_transition:
+                # Pure generalization - automaton learned pattern but sequence unseen
+                return PredictionConfidence.LOW, 0.4
+            else:
+                # No valid transition - cannot predict
+                return PredictionConfidence.UNKNOWN, 0.0
+        
+        # Calculate exact match ratio (memorization)
+        exact_match_ratio = exact_match_count / total_sequences if total_sequences > 0 else 0.0
+        
+        if exact_match_ratio >= 0.8:
+            # High memorization - exact sequence seen frequently
+            return PredictionConfidence.HIGH, exact_match_ratio
+        elif exact_match_ratio >= 0.3 or prefix_match_count > 0:
+            # Medium - partial match or prefix seen, suffix extrapolated
+            # Blend exact match with prefix match for score
+            prefix_ratio = prefix_match_count / max(total_sequences, 1)
+            blended_score = 0.6 * exact_match_ratio + 0.4 * prefix_ratio
+            return PredictionConfidence.MEDIUM, min(0.7, blended_score)
+        elif has_valid_transition:
+            # Low - sequence not in training but automaton can generalize
             return PredictionConfidence.LOW, 0.3
-        
-        confidence_score = pattern_count / total_sequences
-        
-        if confidence_score >= 0.8:
-            return PredictionConfidence.HIGH, confidence_score
-        elif confidence_score >= 0.5:
-            return PredictionConfidence.MEDIUM, confidence_score
         else:
-            return PredictionConfidence.LOW, confidence_score
+            # Unknown - no valid transition
+            return PredictionConfidence.UNKNOWN, 0.0
+            
+    def _group_events_by_thread(self) -> List[List[Dict[str, Any]]]:
+        """Helper to group events by thread."""
+        threads = {}
+        for event in self._event_history:
+            tid = event.get("thread_id", "default")
+            if tid not in threads:
+                threads[tid] = []
+            threads[tid].append(event)
+        
+        # Sort each thread by timestamp
+        for tid in threads:
+            threads[tid].sort(key=lambda x: x.get("timestamp", ""))
+            
+        return list(threads.values())
     
     def _get_alternative_predictions(
         self,
         input_sequence: List[str],
     ) -> List[Tuple[str, float]]:
-        """Get alternative predictions with scores."""
-        # Simple heuristic: return common next actions
+        """Get alternative predictions by querying the automaton."""
+        if not self.learner or not self.learner.get_model():
+            return []
+            
+        # Get learned model (SimpleAutomaton or AALpy model)
+        model = self.learner.get_model()
+        
+        # Try to find current state
+        current_state = 0
+        if hasattr(model, 'initial_state'):
+            current_state = model.initial_state
+            
+        # Advance state
+        valid_path = True
+        
+        # Handle AALpy model vs SimpleAutomaton
+        is_aalpy = not hasattr(model, 'sul') 
+        
+        if is_aalpy:
+            # AALpy logic would go here, simplified fallback
+            return []
+        
+        # SimpleAutomaton logic
+        for inp in input_sequence:
+            key = (current_state, inp)
+            if hasattr(model, 'sul') and key in model.sul._transitions:
+                current_state, _ = model.sul._transitions[key]
+            else:
+                valid_path = False
+                break
+        
+        if not valid_path:
+            return []
+            
+        # Check outgoing transitions from current state
         alternatives = []
-        
-        common_next = {
-            "validate_product_data": ("generate_listing", 0.8),
-            "generate_listing": ("confirm_upload", 0.8),
-            "confirm_upload": ("handoff", 0.7),
-            "TASK_ASSIGN": ("validate_product_data", 0.7),
-        }
-        
-        if input_sequence:
-            last_action = input_sequence[-1]
-            if last_action in common_next:
-                alternatives.append(common_next[last_action])
-        
+        if hasattr(model, 'sul'):
+            total_trans = 0
+            counts = {}
+            
+            for (state, inp), (next_s, out) in model.sul._transitions.items():
+                if state == current_state:
+                    # In our sequence model, the input IS the next valid action
+                    counts[inp] = counts.get(inp, 0) + 1
+                    total_trans += 1
+            
+            for act, count in counts.items():
+                alternatives.append((act, count/total_trans))
+                
         return alternatives
     
     def _fallback_prediction(

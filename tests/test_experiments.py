@@ -267,7 +267,7 @@ class TestComparisonBaselineConditions:
         assert "automata_only" in conditions
         assert "llm_only" in conditions
         assert "real_api" in conditions
-        assert len(conditions) == 8  # 3 original + 4 comparison + 1 real_api
+        assert len(conditions) == 12  # 3 original + 4 comparison + 1 real_api + 3 Phase B + 1 Phase C
     
     def test_comparison_condition_to_dict(self):
         """Test comparison condition serialization includes new fields."""
@@ -398,6 +398,112 @@ class TestComparisonRecoveryStrategies:
         # Simple retry should be worst (or close to it)
         if recovery_rates.get("simple_retry", 0) > 0 and recovery_rates.get("full_system", 0) > 0:
             assert recovery_rates["simple_retry"] <= recovery_rates["full_system"]
+
+
+class TestPhaseBConditions:
+    """Tests for Phase B baseline conditions."""
+    
+    def test_exponential_backoff_condition(self):
+        """Test exponential backoff condition configuration."""
+        from src.experiments.conditions import ExponentialBackoffCondition
+        
+        condition = ExponentialBackoffCondition()
+        
+        assert condition.name == "exponential_backoff"
+        assert condition.should_attempt_recovery() is True
+        assert condition.should_use_automata() is False
+        assert condition.should_use_semantic_protocol() is False
+        assert condition.config.max_retries == 4
+        assert condition.get_reconstruction_strategy() == "exponential_backoff"
+        
+        # Test retry delays method
+        delays = condition.get_retry_delays()
+        assert len(delays) == 4
+        assert 0.09 <= delays[0] <= 0.11  # ~100ms with jitter
+        assert 0.18 <= delays[1] <= 0.22  # ~200ms with jitter
+    
+    def test_circuit_breaker_condition(self):
+        """Test circuit breaker condition configuration."""
+        from src.experiments.conditions import CircuitBreakerCondition
+        
+        condition = CircuitBreakerCondition()
+        
+        assert condition.name == "circuit_breaker"
+        assert condition.should_attempt_recovery() is True
+        assert condition.should_use_automata() is False
+        assert condition.get_reconstruction_strategy() == "circuit_breaker"
+        
+        # Test circuit state
+        state = condition.get_circuit_state()
+        assert state.state == "closed"
+        assert state.can_execute() is True
+    
+    def test_circuit_breaker_state_transitions(self):
+        """Test circuit breaker state machine."""
+        from src.experiments.conditions import CircuitBreakerState
+        
+        state = CircuitBreakerState(failure_threshold=3, cooldown_seconds=0.1)
+        
+        # Initial state
+        assert state.state == "closed"
+        assert state.can_execute() is True
+        
+        # Record failures until open
+        state.record_failure()
+        state.record_failure()
+        assert state.state == "closed"
+        
+        state.record_failure()  # 3rd failure
+        assert state.state == "open"
+        assert state.can_execute() is False
+        
+        # Wait for cooldown
+        import time
+        time.sleep(0.15)
+        assert state.can_execute() is True
+        assert state.state == "half_open"
+        
+        # Success resets
+        state.record_success()
+        assert state.state == "closed"
+    
+    def test_semantic_only_condition(self):
+        """Test semantic-only ablation condition."""
+        from src.experiments.conditions import SemanticOnlyCondition
+        
+        condition = SemanticOnlyCondition()
+        
+        assert condition.name == "semantic_only"
+        assert condition.should_attempt_recovery() is False  # No recovery!
+        assert condition.should_use_semantic_protocol() is True  # Only semantic
+        assert condition.should_use_automata() is False
+        assert condition.get_reconstruction_strategy() == "semantic_only"
+    
+    def test_new_conditions_in_registry(self):
+        """Test new conditions are in registry."""
+        from src.experiments.conditions import list_conditions, get_condition
+        
+        conditions = list_conditions()
+        
+        assert "exponential_backoff" in conditions
+        assert "circuit_breaker" in conditions
+        assert "semantic_only" in conditions
+        assert len(conditions) == 12  # 8 existing + 3 Phase B + 1 Phase C
+        
+        # Test get_condition works
+        exp = get_condition("exponential_backoff")
+        assert exp.name == "exponential_backoff"
+    
+    def test_condition_to_dict_new_conditions(self):
+        """Test new conditions serialize correctly."""
+        from src.experiments.conditions import ExponentialBackoffCondition
+        
+        condition = ExponentialBackoffCondition()
+        data = condition.to_dict()
+        
+        assert data["name"] == "exponential_backoff"
+        assert data["max_retries"] == 4
+        assert data["resilience_enabled"] is True
 
 
 class TestExperimentRunner:
@@ -1035,6 +1141,453 @@ class TestSemanticMetrics:
         assert data["semantic_negotiation_ms"] == 150.0
 
 
+class TestRealReconstruction:
+    """Tests for real reconstruction integration (Phase A)."""
+    
+    def test_recovery_result_dataclass(self):
+        """Test RecoveryResult dataclass structure."""
+        from src.experiments.runner import RecoveryResult
+        
+        result = RecoveryResult(
+            success=True,
+            strategy_used="hybrid",
+            recovery_time_ms=150.0,
+            confidence=0.95,
+            ground_truth_state={"step_index": 2},
+            reconstructed_state={"step_index": 2},
+            reconstruction_accuracy=0.92,
+            timing_breakdown={"reconstruction_ms": 100.0},
+        )
+        
+        assert result.success is True
+        assert result.strategy_used == "hybrid"
+        assert result.recovery_time_ms == 150.0
+        assert result.confidence == 0.95
+        assert result.reconstruction_accuracy == 0.92
+        assert "reconstruction_ms" in result.timing_breakdown
+    
+    def test_ground_truth_capture(self):
+        """Test ground truth state capture before failure."""
+        from src.experiments.runner import ExperimentRunner
+        from src.experiments.conditions import FullSystemCondition
+        from src.experiments.scenario_loader import load_scenario
+        
+        runner = ExperimentRunner(failure_probability=1.0, seed=42)
+        scenario = load_scenario("vendor_onboarding")
+        step = scenario.steps[1]  # Use second step
+        
+        ground_truth = runner._capture_current_state(scenario, step, 1)
+        
+        # Verify ground truth structure
+        assert "scenario_name" in ground_truth
+        assert "current_step" in ground_truth
+        assert "step_index" in ground_truth
+        assert "variables" in ground_truth
+        assert "pending_steps" in ground_truth
+        assert "completed_steps" in ground_truth
+        
+        assert ground_truth["scenario_name"] == "Vendor Onboarding"
+        assert ground_truth["step_index"] == 1
+        assert ground_truth["completed_steps"] == 1
+    
+    def test_reconstruction_accuracy_calculation(self):
+        """Test state similarity calculation for reconstruction accuracy."""
+        from src.experiments.runner import ExperimentRunner
+        
+        runner = ExperimentRunner(seed=42)
+        
+        # Test identical states
+        state_a = {"field1": "value1", "field2": 100, "field3": True}
+        state_b = {"field1": "value1", "field2": 100, "field3": True}
+        accuracy = runner._calculate_state_similarity(state_a, state_b)
+        assert accuracy == 1.0, f"Expected 1.0 for identical states, got {accuracy}"
+        
+        # Test partially matching states
+        state_c = {"field1": "value1", "field2": 100, "field3": False}
+        accuracy = runner._calculate_state_similarity(state_a, state_c)
+        # Should be ~0.67 (2/3 match: field1 and field2 match, field3 doesn't)
+        assert 0.6 < accuracy < 0.7, f"Expected ~0.67 for 2/3 match, got {accuracy}"
+        
+        # Test empty states - both empty should return 1.0
+        accuracy = runner._calculate_state_similarity({}, {})
+        assert accuracy == 1.0, f"Expected 1.0 for both empty, got {accuracy}"
+        
+        # Test one empty state - should return 0.0
+        accuracy = runner._calculate_state_similarity(state_a, {})
+        assert accuracy == 0.0, f"Expected 0.0 when one state is empty, got {accuracy}"
+        
+        # Test with only string fields (to ensure no boolean/int confusion)
+        state_d = {"name": "test", "status": "active"}
+        state_e = {"name": "test", "status": "active"}
+        accuracy = runner._calculate_state_similarity(state_d, state_e)
+        assert accuracy == 1.0, f"Expected 1.0 for identical string-only states, got {accuracy}"
+    
+    def test_reconstruction_accuracy_nested_dict(self):
+        """Test accuracy calculation with nested dictionaries."""
+        from src.experiments.runner import ExperimentRunner
+        
+        runner = ExperimentRunner(seed=42)
+        
+        state_a = {
+            "outer": {"inner1": "a", "inner2": "b"},
+            "simple": 100,
+        }
+        
+        state_b = {
+            "outer": {"inner1": "a", "inner2": "b"},
+            "simple": 100,
+        }
+        
+        accuracy = runner._calculate_state_similarity(state_a, state_b)
+        assert accuracy == 1.0
+        
+        # Partial nested match
+        state_c = {
+            "outer": {"inner1": "a", "inner2": "c"},  # inner2 differs
+            "simple": 100,
+        }
+        
+        accuracy = runner._calculate_state_similarity(state_a, state_c)
+        # outer has 50% match (1/2), simple has 100% match
+        # Total: (0.5 + 1.0) / 2 = 0.75
+        assert 0.7 < accuracy < 0.8
+    
+    def test_reconstruction_accuracy_numeric_tolerance(self):
+        """Test accuracy calculation with numeric tolerance."""
+        from src.experiments.runner import ExperimentRunner
+        
+        runner = ExperimentRunner(seed=42)
+        
+        state_a = {"value": 100.0}
+        state_b = {"value": 100.5}  # 0.5% deviation
+        
+        # With 1% tolerance (default), should match
+        accuracy = runner._calculate_state_similarity(state_a, state_b, numeric_tolerance=0.01)
+        assert accuracy == 1.0
+        
+        # With strict tolerance, should not match
+        accuracy = runner._calculate_state_similarity(state_a, state_b, numeric_tolerance=0.001)
+        assert accuracy == 0.0
+    
+    def test_rng_independence(self):
+        """Test that separate RNG streams produce independent results."""
+        from src.experiments.runner import ExperimentRunner
+        
+        runner = ExperimentRunner(seed=42)
+        
+        # Verify separate RNG instances exist
+        assert runner._failure_rng is not runner._semantic_rng
+        assert runner._semantic_rng is not runner._recovery_rng
+        assert runner._recovery_rng is not runner._step_rng
+        
+        # Verify they have different states (different seeds)
+        failure_val = runner._failure_rng.random()
+        semantic_val = runner._semantic_rng.random()
+        recovery_val = runner._recovery_rng.random()
+        step_val = runner._step_rng.random()
+        
+        # Reset and verify reproducibility
+        runner2 = ExperimentRunner(seed=42)
+        
+        assert runner2._failure_rng.random() == failure_val
+        assert runner2._semantic_rng.random() == semantic_val
+        assert runner2._recovery_rng.random() == recovery_val
+        assert runner2._step_rng.random() == step_val
+    
+    def test_rng_stream_separation(self):
+        """Test that failure RNG doesn't affect semantic RNG."""
+        from src.experiments.runner import ExperimentRunner
+        
+        runner1 = ExperimentRunner(seed=42)
+        runner2 = ExperimentRunner(seed=42)
+        
+        # In runner1, consume many failure RNG values
+        for _ in range(100):
+            runner1._failure_rng.random()
+        
+        # In runner2, don't consume any failure RNG values
+        
+        # Both should produce same semantic RNG value
+        # (since semantic RNG has separate seed offset)
+        sem1 = runner1._semantic_rng.random()
+        sem2 = runner2._semantic_rng.random()
+        
+        assert sem1 == sem2
+    
+    def test_step_result_includes_ground_truth_fields(self):
+        """Test StepResult includes ground truth validation fields."""
+        from src.experiments.runner import StepResult
+        
+        step_result = StepResult(
+            step_name="test_step",
+            agent="test-agent",
+            status="recovered",
+            success=True,
+            duration_ms=50.0,
+            recovered=True,
+            ground_truth_state={"step_index": 1},
+            reconstructed_state={"step_index": 1},
+            reconstruction_accuracy=0.95,
+        )
+        
+        assert step_result.ground_truth_state == {"step_index": 1}
+        assert step_result.reconstructed_state == {"step_index": 1}
+        assert step_result.reconstruction_accuracy == 0.95
+    
+    def test_experiment_result_includes_accuracy_fields(self):
+        """Test ExperimentResult includes aggregated accuracy fields."""
+        from src.experiments.runner import ExperimentResult
+        
+        result = ExperimentResult(
+            run_id="test-001",
+            scenario_name="Test",
+            condition_name="full_system",
+            success=True,
+            total_duration_ms=100.0,
+            steps_completed=5,
+            total_steps=5,
+            failure_occurred=True,
+            recovery_success=True,
+            mean_reconstruction_accuracy=0.85,
+            reconstruction_accuracies=[0.80, 0.85, 0.90],
+        )
+        
+        assert result.mean_reconstruction_accuracy == 0.85
+        assert len(result.reconstruction_accuracies) == 3
+        
+        # Check to_dict includes fields
+        data = result.to_dict()
+        assert "mean_reconstruction_accuracy" in data
+        assert "reconstruction_accuracies" in data
+    
+    def test_runner_tracks_reconstruction_accuracy(self):
+        """Test that runner tracks reconstruction accuracy during recovery."""
+        from src.experiments.runner import ExperimentRunner
+        from src.experiments.conditions import FullSystemCondition
+        
+        runner = ExperimentRunner(failure_probability=0.9, seed=42)
+        condition = FullSystemCondition()
+        
+        results = runner.run_batch("vendor_onboarding", condition, num_runs=30)
+        
+        # Get results with recovery
+        recovered = [r for r in results if r.recovery_success]
+        
+        # Should have some reconstructions with accuracy
+        accuracies = [r.mean_reconstruction_accuracy for r in recovered if r.mean_reconstruction_accuracy > 0]
+        
+        if accuracies:
+            # Accuracy should be reasonable for full system
+            avg_accuracy = sum(accuracies) / len(accuracies)
+            assert avg_accuracy > 0.5  # Should be better than random
+    
+    def test_simulated_reconstruction_generates_state(self):
+        """Test that _simulate_recovery_with_state returns reconstructed state."""
+        from src.experiments.runner import ExperimentRunner
+        from src.experiments.conditions import FullSystemCondition
+        from src.experiments.scenario_loader import load_scenario
+        
+        runner = ExperimentRunner(seed=42)
+        condition = FullSystemCondition()
+        scenario = load_scenario("vendor_onboarding")
+        step = scenario.steps[1]
+        
+        ground_truth = {
+            "scenario_name": "Vendor Onboarding",
+            "step_index": 1,
+            "variables": {"workflow_id": "test-123"},
+        }
+        
+        success, reconstructed = runner._simulate_recovery_with_state(
+            condition, scenario, step, "crash", ground_truth
+        )
+        
+        # Should return a reconstructed state dict
+        assert reconstructed is not None
+        assert isinstance(reconstructed, dict)
+        
+        # Reconstructed state should be related to ground truth
+        # (may have some corrupted fields for accuracy testing)
+        assert "scenario_name" in reconstructed
+    
+    def test_metrics_collector_tracks_reconstruction_accuracy(self):
+        """Test MetricsCollector aggregates reconstruction accuracy."""
+        from src.experiments.collector import MetricsCollector
+        from src.experiments.runner import ExperimentResult
+        
+        collector = MetricsCollector()
+        
+        for i in range(10):
+            result = ExperimentResult(
+                run_id=f"test-{i}",
+                scenario_name="Test",
+                condition_name="full_system",
+                success=True,
+                total_duration_ms=100.0,
+                steps_completed=5,
+                total_steps=5,
+                failure_occurred=True,
+                recovery_success=True,
+                mean_reconstruction_accuracy=0.80 + i * 0.02,  # 0.80-0.98
+            )
+            collector.record_result(result)
+        
+        metrics = collector.get_metrics()
+        
+        # Should have accuracy stats
+        assert metrics.reconstruction_accuracy_mean > 0
+        # Mean should be around 0.89 ((0.80 + 0.98) / 2)
+        assert 0.85 < metrics.reconstruction_accuracy_mean < 0.93
+        
+        # Should have accuracy by condition
+        assert "full_system" in metrics.reconstruction_accuracy_by_condition
+    
+    @pytest.mark.asyncio
+    async def test_execute_real_recovery_returns_result(self):
+        """Test that _execute_real_recovery returns a RecoveryResult."""
+        from src.experiments.runner import ExperimentRunner
+        from src.experiments.conditions import FullSystemCondition
+        
+        runner = ExperimentRunner(seed=42)
+        condition = FullSystemCondition()
+        
+        ground_truth = {
+            "scenario_name": "Test",
+            "step_index": 2,
+            "variables": {"workflow_id": "test-456"},
+        }
+        
+        events = [
+            {"event_type": "step_execution", "step_name": "step1", "agent": "test"},
+            {"event_type": "step_execution", "step_name": "step2", "agent": "test"},
+        ]
+        
+        result = await runner._execute_real_recovery(
+            condition=condition,
+            agent_id="test-agent",
+            thread_id="test-thread",
+            ground_truth_state=ground_truth,
+            events=events,
+        )
+        
+        # Should return a RecoveryResult
+        assert hasattr(result, 'success')
+        assert hasattr(result, 'strategy_used')
+        assert hasattr(result, 'recovery_time_ms')
+        assert hasattr(result, 'reconstruction_accuracy')
+        
+        # Should have timing breakdown
+        assert result.timing_breakdown is not None
+
+
+class TestAblationMetrics:
+    """Tests for ablation study metrics (Phase C)."""
+    
+    def test_ablation_metrics_calculation(self):
+        """Test AblationMetrics.calculate() works correctly."""
+        from src.experiments.collector import AblationMetrics
+        
+        mock_results = {
+            "baseline": {"success_rate": 0.35},
+            "semantic_only": {"success_rate": 0.40},
+            "automata_only": {"success_rate": 0.70},
+            "llm_only": {"success_rate": 0.68},
+            "reconstruction": {"success_rate": 0.84},
+            "full_no_semantic": {"success_rate": 0.90},
+            "full_system": {"success_rate": 0.95},
+        }
+        
+        metrics = AblationMetrics.calculate(mock_results)
+        
+        # Semantic contribution: full - no_semantic = 0.95 - 0.90 = 0.05 = 5pp
+        assert abs(metrics.semantic_contribution - 5.0) < 0.1
+        
+        # Automata contribution: full - reconstruction = 0.95 - 0.84 = 0.11 = 11pp
+        assert abs(metrics.automata_contribution - 11.0) < 0.1
+        
+        # Peer contribution: reconstruction - llm_only = 0.84 - 0.68 = 0.16 = 16pp
+        assert abs(metrics.peer_context_contribution - 16.0) < 0.1
+        
+        # LLM contribution: full - automata_only = 0.95 - 0.70 = 0.25 = 25pp
+        assert abs(metrics.llm_contribution - 25.0) < 0.1
+    
+    def test_ablation_metrics_to_dict(self):
+        """Test AblationMetrics serialization."""
+        from src.experiments.collector import AblationMetrics
+        
+        metrics = AblationMetrics(
+            semantic_contribution=5.0,
+            automata_contribution=11.0,
+            peer_context_contribution=16.0,
+            llm_contribution=25.0,
+            semantic_automata_synergy=2.0,
+        )
+        
+        data = metrics.to_dict()
+        
+        assert "semantic_contribution_pp" in data
+        assert data["semantic_contribution_pp"] == 5.0
+        assert "automata_contribution_pp" in data
+        assert "peer_context_contribution_pp" in data
+        assert "llm_contribution_pp" in data
+        assert "semantic_automata_synergy_pp" in data
+    
+    def test_ablation_metrics_missing_conditions(self):
+        """Test AblationMetrics handles missing conditions gracefully."""
+        from src.experiments.collector import AblationMetrics
+        
+        mock_results = {
+            "full_system": {"success_rate": 0.95},
+        }
+        
+        metrics = AblationMetrics.calculate(mock_results)
+        
+        # Should default to 0 if conditions missing
+        assert metrics.semantic_contribution == 0.0
+        assert metrics.automata_contribution == 0.0
+    
+    def test_full_no_semantic_condition(self):
+        """Test full_no_semantic condition for ablation."""
+        from src.experiments.conditions import get_condition
+        
+        condition = get_condition("full_no_semantic")
+        
+        assert condition.name == "full_no_semantic"
+        assert condition.should_use_semantic_protocol() is False
+        assert condition.should_use_automata() is True
+        assert condition.should_query_peers() is True
+        assert condition.should_attempt_recovery() is True
+        assert condition.get_reconstruction_strategy() == "hybrid"
+    
+    def test_full_no_semantic_in_registry(self):
+        """Test full_no_semantic is in registry."""
+        from src.experiments.conditions import list_conditions, get_condition
+        
+        conditions = list_conditions()
+        
+        assert "full_no_semantic" in conditions
+        assert len(conditions) == 12  # 11 existing + 1 new
+        
+        condition = get_condition("full_no_semantic")
+        assert condition.name == "full_no_semantic"
+    
+    def test_ablation_condition_comparison(self):
+        """Test that full_system vs full_no_semantic isolates semantic contribution."""
+        from src.experiments.conditions import FullSystemCondition, FullNoSemanticCondition
+        
+        full = FullSystemCondition()
+        no_semantic = FullNoSemanticCondition()
+        
+        # Both should have same features except semantic
+        assert full.should_use_automata() == no_semantic.should_use_automata()
+        assert full.should_query_peers() == no_semantic.should_query_peers()
+        assert full.should_attempt_recovery() == no_semantic.should_attempt_recovery()
+        
+        # Only difference should be semantic protocol
+        assert full.should_use_semantic_protocol() is True
+        assert no_semantic.should_use_semantic_protocol() is False
+
+
 class TestIntegration:
     """Integration tests for full experiment workflow."""
     
@@ -1053,7 +1606,7 @@ class TestIntegration:
             )
             results_by_condition[condition.name] = results
         
-        # Verify we have results for all conditions (7 total now)
+        # Verify we have results for all conditions (12 total: 3 original + 4 comparison + 1 real_api + 3 Phase B + 1 Phase C)
         assert "baseline" in results_by_condition
         assert "reconstruction" in results_by_condition
         assert "full_system" in results_by_condition
@@ -1063,10 +1616,16 @@ class TestIntegration:
         assert "automata_only" in results_by_condition
         assert "llm_only" in results_by_condition
         assert "real_api" in results_by_condition
+        # Phase B baselines
+        assert "exponential_backoff" in results_by_condition
+        assert "circuit_breaker" in results_by_condition
+        assert "semantic_only" in results_by_condition
+        # Phase C ablation
+        assert "full_no_semantic" in results_by_condition
         
         # Verify metrics
         metrics = runner.get_metrics()
-        assert metrics.total_runs == 80  # 10 * 8 conditions
+        assert metrics.total_runs == 120  # 10 * 12 conditions
     
     def test_experiment_reproducibility(self):
         """Test that experiments are reproducible with seed."""
@@ -1086,3 +1645,241 @@ class TestIntegration:
             assert r1.success == r2.success
             assert r1.failure_occurred == r2.failure_occurred
 
+
+class TestCascadeFailures:
+    """Tests for cascade failure scenarios (Phase F)."""
+    
+    def test_cascade_config_creation(self):
+        """Test CascadeConfig dataclass creation."""
+        from src.experiments.scenario_loader import CascadeConfig
+        
+        config = CascadeConfig(
+            enabled=True,
+            trigger_step=2,
+            downstream_probability=0.8,
+            max_depth=3,
+            delay_between_failures_ms=200,
+        )
+        
+        assert config.enabled is True
+        assert config.trigger_step == 2
+        assert config.downstream_probability == 0.8
+        assert config.max_depth == 3
+        assert config.delay_between_failures_ms == 200
+    
+    def test_cascade_config_from_dict(self):
+        """Test CascadeConfig creation from dictionary."""
+        from src.experiments.scenario_loader import CascadeConfig
+        
+        data = {
+            "enabled": True,
+            "trigger_step": 3,
+            "downstream_probability": 0.7,
+            "max_depth": 2,
+            "delay_between_failures_ms": 150,
+        }
+        
+        config = CascadeConfig.from_dict(data)
+        
+        assert config.enabled is True
+        assert config.trigger_step == 3
+        assert config.downstream_probability == 0.7
+        assert config.max_depth == 2
+        assert config.delay_between_failures_ms == 150
+    
+    def test_cascade_config_to_dict(self):
+        """Test CascadeConfig serialization to dictionary."""
+        from src.experiments.scenario_loader import CascadeConfig
+        
+        config = CascadeConfig(
+            enabled=True,
+            trigger_step=1,
+            downstream_probability=0.6,
+            max_depth=2,
+            delay_between_failures_ms=100,
+        )
+        
+        d = config.to_dict()
+        
+        assert d["enabled"] is True
+        assert d["trigger_step"] == 1
+        assert d["downstream_probability"] == 0.6
+        assert d["max_depth"] == 2
+        assert d["delay_between_failures_ms"] == 100
+    
+    def test_failure_injection_config_with_cascade(self):
+        """Test FailureInjectionConfig with cascade configuration."""
+        from src.experiments.scenario_loader import FailureInjectionConfig, CascadeConfig
+        
+        data = {
+            "enabled": True,
+            "probability": 0.4,
+            "target_steps": [1, 2, 3],
+            "failure_types": ["crash", "timeout"],
+            "cascade": {
+                "enabled": True,
+                "trigger_step": 2,
+                "downstream_probability": 0.7,
+                "max_depth": 2,
+                "delay_between_failures_ms": 150,
+            },
+        }
+        
+        config = FailureInjectionConfig.from_dict(data)
+        
+        assert config.enabled is True
+        assert config.probability == 0.4
+        assert config.cascade is not None
+        assert config.cascade.enabled is True
+        assert config.cascade.trigger_step == 2
+        assert config.has_cascade() is True
+    
+    def test_failure_injection_config_without_cascade(self):
+        """Test FailureInjectionConfig without cascade configuration."""
+        from src.experiments.scenario_loader import FailureInjectionConfig
+        
+        data = {
+            "enabled": True,
+            "probability": 0.3,
+            "target_steps": [1],
+            "failure_types": ["crash"],
+        }
+        
+        config = FailureInjectionConfig.from_dict(data)
+        
+        assert config.cascade is None
+        assert config.has_cascade() is False
+    
+    def test_load_cascade_failure_scenario(self):
+        """Test loading the cascade_failure.yaml scenario."""
+        from src.experiments.scenario_loader import ScenarioLoader
+        
+        loader = ScenarioLoader()
+        scenario = loader.load("cascade_failure")
+        
+        assert scenario.name == "Cascade Failure Test"
+        assert scenario.complexity == "high"
+        assert len(scenario.agents) == 4  # coordinator, product-agent-1, product-agent-2, marketing
+        assert len(scenario.steps) == 8
+        
+        # Check cascade config
+        assert scenario.failure_injection.cascade is not None
+        assert scenario.failure_injection.cascade.enabled is True
+        assert scenario.failure_injection.cascade.trigger_step == 3
+        assert scenario.failure_injection.cascade.downstream_probability == 0.70
+        assert scenario.failure_injection.cascade.max_depth == 2
+    
+    def test_experiment_result_cascade_fields(self):
+        """Test ExperimentResult includes cascade failure fields."""
+        from src.experiments.runner import ExperimentResult
+        
+        result = ExperimentResult(
+            run_id="test-001",
+            scenario_name="cascade_failure",
+            condition_name="full_system",
+            success=True,
+            total_duration_ms=500.0,
+            steps_completed=8,
+            total_steps=8,
+            failure_occurred=True,
+            cascade_triggered=True,
+            cascade_failures=2,
+            cascade_depth=2,
+        )
+        
+        assert result.cascade_triggered is True
+        assert result.cascade_failures == 2
+        assert result.cascade_depth == 2
+    
+    def test_experiment_result_to_dict_includes_cascade(self):
+        """Test ExperimentResult.to_dict() includes cascade fields."""
+        from src.experiments.runner import ExperimentResult
+        
+        result = ExperimentResult(
+            run_id="test-001",
+            scenario_name="cascade_failure",
+            condition_name="full_system",
+            success=True,
+            total_duration_ms=500.0,
+            steps_completed=8,
+            total_steps=8,
+            failure_occurred=True,
+            cascade_triggered=True,
+            cascade_failures=3,
+            cascade_depth=2,
+        )
+        
+        d = result.to_dict()
+        
+        assert "cascade_triggered" in d
+        assert "cascade_failures" in d
+        assert "cascade_depth" in d
+        assert d["cascade_triggered"] is True
+        assert d["cascade_failures"] == 3
+        assert d["cascade_depth"] == 2
+    
+    def test_runner_cascade_failure_method(self):
+        """Test ExperimentRunner._should_cascade_failure method."""
+        from src.experiments.runner import ExperimentRunner
+        from src.experiments.scenario_loader import ScenarioLoader
+        
+        runner = ExperimentRunner(seed=42)
+        loader = ScenarioLoader()
+        scenario = loader.load("cascade_failure")
+        
+        # Test cascade propagation logic
+        # Should not cascade if not triggered
+        should_cascade_not_triggered = runner._should_cascade_failure(
+            step_idx=4,
+            scenario=scenario,
+            cascade_depth=0,
+            cascade_triggered=False,
+        )
+        assert should_cascade_not_triggered is False
+        
+        # Should respect max_depth
+        should_cascade_max_depth = runner._should_cascade_failure(
+            step_idx=6,
+            scenario=scenario,
+            cascade_depth=3,  # max_depth is 2
+            cascade_triggered=True,
+        )
+        assert should_cascade_max_depth is False
+    
+    def test_runner_get_cascade_failure_type(self):
+        """Test ExperimentRunner._get_cascade_failure_type method."""
+        from src.experiments.runner import ExperimentRunner
+        from src.experiments.scenario_loader import ScenarioLoader
+        
+        runner = ExperimentRunner(seed=42)
+        loader = ScenarioLoader()
+        scenario = loader.load("cascade_failure")
+        
+        # Get cascade failure type
+        failure_type = runner._get_cascade_failure_type(
+            scenario=scenario,
+            original_failure_type="crash",
+        )
+        
+        # Should be one of the cascade types
+        assert failure_type in ["timeout", "crash", "message_corruption"]
+    
+    def test_run_cascade_scenario(self):
+        """Test running the cascade failure scenario."""
+        from src.experiments.runner import ExperimentRunner
+        from src.experiments.conditions import get_condition
+        
+        runner = ExperimentRunner(seed=42, failure_probability=0.5)
+        condition = get_condition("full_system")
+        
+        # Run a few experiments
+        results = runner.run_batch("cascade_failure", condition, num_runs=5)
+        
+        assert len(results) == 5
+        
+        # Check that cascade fields are populated
+        for result in results:
+            assert hasattr(result, "cascade_triggered")
+            assert hasattr(result, "cascade_failures")
+            assert hasattr(result, "cascade_depth")
+            assert result.scenario_name == "Cascade Failure Test"
